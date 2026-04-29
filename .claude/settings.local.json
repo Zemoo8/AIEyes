@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(d['version']\\)\")",
+      "Bash(curl -sI \"https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.tflite\")",
+      "Bash(curl -sI \"https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.tflite\")",
+      "Bash(curl -s \"https://api.github.com/repos/ultralytics/assets/releases/latest\")",
+      "Bash(node -e \"const d=require\\('fs'\\).readFileSync\\('/dev/stdin','utf8'\\);const r=JSON.parse\\(d\\);console.log\\('tag:',r.tag_name\\);r.assets&&r.assets.filter\\(a=>a.name.includes\\('tflite'\\)\\).forEach\\(a=>console.log\\(a.name,a.browser_download_url\\)\\)\")",
+      "Bash(curl -s \"https://api.github.com/repos/ultralytics/assets/releases/latest\" -o /tmp/releases.json)",
+      "Bash(node -e \"const d=require\\('fs'\\).readFileSync\\('C:/Users/LENOVO/AppData/Local/Temp/releases.json','utf8'\\);const r=JSON.parse\\(d\\);console.log\\('tag:',r.tag_name\\);\\(r.assets||[]\\).filter\\(a=>a.name.includes\\('tflite'\\)\\).forEach\\(a=>console.log\\(a.name,'->',a.browser_download_url\\)\\)\")",
+      "Bash(curl -s \"https://huggingface.co/api/models?search=yolov8n+tflite&limit=5\" -o /tmp/hf_search.json)",
+      "Bash(node -e ' *)",
+      "Bash(node *)",
+      "Bash(curl -sI \"https://huggingface.co/Ultralytics/assets/resolve/main/yolov8n.tflite\")",
+      "Bash(curl -sI \"https://ultralytics.com/assets/yolov8n.tflite\")",
+      "Bash(curl -sI \"https://github.com/ultralytics/ultralytics/raw/main/tests/assets/bus.jpg\")",
+      "Bash(python *)",
+      "Bash(pip install *)",
+      "Bash(npx expo *)"
+    ]
+  }
+}
