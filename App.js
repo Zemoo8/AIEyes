@@ -724,10 +724,10 @@ export default function App() {
       const delta = Math.sqrt((x - prev.x) ** 2 + (y - prev.y) ** 2 + (z - prev.z) ** 2);
       prev = { x, y, z };
 
-      if (delta > 8) {
+      if (delta > 7) {
         const now = Date.now();
 
-        if (now - lastShake.current < 1800) {
+        if (now - lastShake.current < 2000) {
           shakeCount++;
         } else {
           shakeCount = 1;
@@ -988,11 +988,11 @@ export default function App() {
     setScanning(true);
     try {
       console.log('[Currency] grabbing frame...');
-      const frame = await grabFrame(camRef, 1024, 0.75);
+      const frame = await grabFrame(camRef, 1024, 0.82);
       if (epoch.current !== myEpoch) return;
       const result = await groqVision(
         frame.base64,
-        'You are identifying Tunisian money. Reply with ONLY ONE short value from this list: 100 مليم, 200 مليم, 500 مليم, 1 دينار, 2 دينار, 5 دينار, 10 دينار, 20 دينار, 50 دينار. If unsure or no Tunisian money is visible, reply exactly: لا يوجد نقد. No explanation.',
+        'You are identifying Tunisian money. Reply with EXACTLY one value from this list and nothing else: 100 مليم, 200 مليم, 500 مليم, 1 دينار, 2 دينار, 5 دينار, 10 دينار, 20 دينار, 50 دينار. If the note is not clearly visible, reply exactly: لا يوجد نقد. Do not explain.',
         GROQ_CURRENCY_MODELS,
         50
       );
@@ -1011,8 +1011,12 @@ export default function App() {
         '10 دينار','20 دينار','50 دينار'
       ];
 
-      // Extract the allowed value from result (in case it contains extra text)
-      const clean = allowed.find((v) => (result || '').includes(v));
+      // Extract the allowed value only when it matches a full token.
+      const normalizedResult = normalizeText(result);
+      const clean = allowed.find((v) => {
+        const token = normalizeText(v);
+        return new RegExp(`(^|\\s)${token}(\\s|$)`, 'u').test(normalizedResult);
+      });
       if (!clean) {
         console.log('[Currency] no valid currency detected');
         return;
@@ -1126,27 +1130,25 @@ export default function App() {
       return;
     }
 
-    // Arabic/French/English search commands — extract target and jump to Find mode
+    // Search command — MUST run before normal mode switching
     const searchPatterns = [
-      /ابحث عن (.+)/u,
-      /أبحث عن (.+)/u,
-      /دور على (.+)/u,
-      /فتش على (.+)/u,
-      /search for (.+)/i,
-      /^find (.+)/i,
+      /(?:ابحث|أبحث|بحث)\s+(?:عن|على)?\s*(.+)/u,
+      /(?:دور|فتش)\s+(?:عن|على)?\s*(.+)/u,
+      /(?:search|find|look)\s+(?:for)?\s*(.+)/i,
     ];
     for (const pattern of searchPatterns) {
       const match = spoken.match(pattern);
       if (match) {
-        const target = match[1].trim();
-        if (target) {
+        const target = match[1]?.trim();
+        if (target && !['عن', 'على', 'for'].includes(target.toLowerCase())) {
           const findIdx = MODES.findIndex(mo => mo.id === 'find');
           switchMode(findIdx);
           setTimeout(() => {
             setFindTgt(target);
+            prevKey.current = '';
+            lastSpoke.current = 0;
             announce(`جاري البحث عن: ${target}`);
-            doFind();
-        }, 300);
+          }, 300);
           shakeVoiceModeRef.current = false;
           return;
         }
