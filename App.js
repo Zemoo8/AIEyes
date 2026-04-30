@@ -39,7 +39,7 @@ const MODES = [
 const SOS_WORDS = [
   'نجدة', 'النجدة', 'ساعدني', 'أغثني', 'مساعدة',
   'خطر', 'الله', 'يا ناس',
-  'help', 'urgence', 'urgent', 'sos',
+  'help', 'help me', 'urgence', 'urgent', 'sos',
 ];
 const GREEN = '#22c55e';
 const ORANGE = '#f97316';
@@ -81,7 +81,7 @@ const LABEL_ALIASES = {
   truck: ['شاحنة', 'truck'],
   bottle: ['زجاجة', 'bottle'],
   cup: ['كأس', 'cup', 'كوب'],
-  chair: ['كرسي', 'chair'],
+  chair: ['كرسي', 'كورسي', 'كُرسي', 'chair', 'corsi', 'kursi', 'korsi'],
   couch: ['أريكة', 'couch', 'sofa'],
   bed: ['سرير', 'bed'],
   'dining table': ['طاولة', 'table', 'dining table'],
@@ -129,15 +129,28 @@ function matchesTarget(label, target) {
   const normalizedTarget = normalizeText(target);
   if (!normalizedTarget) return false;
   const aliases = LABEL_ALIASES[label] ?? [label];
-  return aliases.some((alias) => {
+  
+  // Try normalized matching first
+  for (const alias of aliases) {
     const normalizedAlias = normalizeText(alias);
-    if (!normalizedAlias) return false;
-    return (
+    if (!normalizedAlias) continue;
+    if (
       normalizedAlias === normalizedTarget
       || normalizedTarget.includes(normalizedAlias)
       || normalizedAlias.includes(normalizedTarget)
-    );
-  });
+    ) return true;
+  }
+  
+  // Try direct substring match (for cases like Latin "Corsi" matching Arabic "كرسي")
+  const targetLower = target.toLowerCase().trim();
+  for (const alias of aliases) {
+    const aliasLower = alias.toLowerCase().trim();
+    if (aliasLower.includes(targetLower) || targetLower.includes(aliasLower)) {
+      return true;
+    }
+  }
+  
+  return false;
 }
 
 function detectionPosition(box, frameWidth) {
@@ -214,6 +227,8 @@ function shouldWarnClosePerson(det, frame) {
   return heightRatio > 0.35 || areaRatio > 0.2;
 }
 
+const BOX_Y_OFFSET = -100;
+
 function computeOverlayRect(det, frame, mirrored = false) {
   const frameWidth = frame.width ?? frame.frameWidth;
   const frameHeight = frame.height ?? frame.frameHeight;
@@ -226,10 +241,18 @@ function computeOverlayRect(det, frame, mirrored = false) {
   const boxLeft = mirrored ? frameWidth - det.box.x2 : det.box.x1;
   const boxRight = mirrored ? frameWidth - det.box.x1 : det.box.x2;
 
-  const left = clamp(offsetX + boxLeft * scale, 0, SW - 8);
-  const top = clamp(offsetY + det.box.y1 * scale, 0, SH - 8);
-  const width = clamp((boxRight - boxLeft) * scale, 24, SW - left);
-  const height = clamp((det.box.y2 - det.box.y1) * scale, 24, SH - top);
+  // Apply Y offset to move boxes up, add padding, and clamp
+  const xPadding = 8;
+  const yPadding = 12;
+  let left = offsetX + boxLeft * scale - xPadding;
+  let top = offsetY + det.box.y1 * scale + BOX_Y_OFFSET - yPadding;
+  let width = (boxRight - boxLeft) * scale + (xPadding * 2);
+  let height = (det.box.y2 - det.box.y1) * scale + (yPadding * 2);
+
+  left = clamp(left, 0, SW - 8);
+  top = clamp(top, 0, SH - 8);
+  width = clamp(width, 24, SW - left);
+  height = clamp(height, 24, SH - top);
 
   return {
     left,
@@ -280,7 +303,7 @@ const GROQ_CURRENCY_MODELS = [
 ];
 let groqVisionBlockedUntil = 0;
 
-async function groqVision(base64, prompt, models = GROQ_VISION_MODELS) {
+async function groqVision(base64, prompt, models = GROQ_VISION_MODELS, maxTokens = 400) {
   if (Date.now() < groqVisionBlockedUntil) return null;
   console.log('[Groq] vision start, prompt:', prompt.slice(0, 60));
   for (const model of models) {
@@ -294,7 +317,7 @@ async function groqVision(base64, prompt, models = GROQ_VISION_MODELS) {
             { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64}` } },
             { type: 'text', text: prompt },
           ]}],
-          max_tokens: 400,
+          max_tokens: maxTokens,
         }),
       });
       console.log('[Groq] vision status:', res.status, 'model:', model);
@@ -443,6 +466,7 @@ export default function App() {
   const [scanning,  setScanning]  = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [status,       setStatus]       = useState('');
+  const shakeVoiceModeRef = useRef(false);
   const [overlayState, setOverlayState] = useState({
     frameWidth: 1,
     frameHeight: 1,
@@ -456,8 +480,9 @@ export default function App() {
   const speakTimer   = useRef(null);
   const lastReadTxt  = useRef('');
   const loop         = useRef(null);
-  const recRef       = useRef(null);
-  const sosLoop      = useRef(null);
+  const recRef              = useRef(null);
+  const voiceAutoStopTimer  = useRef(null);
+  const sosLoop             = useRef(null);
   const prevKey      = useRef('');
   const lastSpoke    = useRef(0);
   const lastShake    = useRef(0);
@@ -536,7 +561,7 @@ export default function App() {
     speakTimer.current = setTimeout(release, 5000);
   }
 
-  async function startListening() {
+  async function startListening(autoStopMs = null) {
     if (recRef.current) return;
     try {
       Speech.stop();
@@ -557,7 +582,11 @@ export default function App() {
       recRef.current = recording;
       setListening(true);
       console.log('[Mic] recording started');
-      tts('أستمع');
+      Vibration.vibrate(50);
+      if (autoStopMs != null) {
+        clearTimeout(voiceAutoStopTimer.current);
+        voiceAutoStopTimer.current = setTimeout(() => stopListeningAndProcess(), autoStopMs);
+      }
     } catch (e) {
       console.log('[Mic] start error:', e?.message);
       recRef.current = null;
@@ -567,6 +596,7 @@ export default function App() {
   }
 
   async function stopListeningAndProcess() {
+    clearTimeout(voiceAutoStopTimer.current);
     setListening(false);
     try {
       const current = recRef.current;
@@ -662,7 +692,12 @@ export default function App() {
         console.log('[Supabase] sessions insert:', error ?? 'ok');
       } catch (e) { console.log('[Supabase] sessions error:', e); }
     })();
-    return () => { clearInterval(loop.current); clearInterval(sosLoop.current); clearTimeout(speakTimer.current); };
+    return () => {
+      clearInterval(loop.current);
+      clearInterval(sosLoop.current);
+      clearTimeout(speakTimer.current);
+      clearTimeout(voiceAutoStopTimer.current);
+    };
   }, []);
 
   // ── live dot pulse ──
@@ -679,7 +714,7 @@ export default function App() {
     Animated.loop(Animated.timing(scanAnim, { toValue: 1, duration: 1600, useNativeDriver: true })).start();
   }, [scanning]);
 
-  // ── accelerometer: shake (magnitude > 15) → open mic ──
+  // ── accelerometer: double shake (within 1200ms) → open voice control ──
   useEffect(() => {
     Accelerometer.setUpdateInterval(100);
     let prev = { x: 0, y: 0, z: 0 };
@@ -689,10 +724,10 @@ export default function App() {
       const delta = Math.sqrt((x - prev.x) ** 2 + (y - prev.y) ** 2 + (z - prev.z) ** 2);
       prev = { x, y, z };
 
-      if (delta > 15) {
+      if (delta > 8) {
         const now = Date.now();
 
-        if (now - lastShake.current < 1200) {
+        if (now - lastShake.current < 1800) {
           shakeCount++;
         } else {
           shakeCount = 1;
@@ -701,13 +736,14 @@ export default function App() {
         lastShake.current = now;
 
         if (shakeCount === 1) {
-          console.log('[Shake] first');
+          console.log('[Shake] first shake detected');
         }
 
         if (shakeCount === 2) {
-          console.log('[Shake] second → mic');
+          console.log('[Shake] second shake → voice control mode');
           Vibration.vibrate(100);
-          startListening();
+          shakeVoiceModeRef.current = true;
+          startListening(3500);
           shakeCount = 0;
         }
       }
@@ -815,14 +851,14 @@ export default function App() {
       const frame = await grabFrame(camRef, 768, 0.45);
       if (epoch.current !== myEpoch) return;
 
-      // Try Gemini first (best free OCR), fallback to Groq
-      let text = await geminiReadText(frame.base64);
+      // Try Groq first (reliable, no quota limits), fallback to Gemini
+      let text = await groqVision(
+        frame.base64,
+        'اقرأ جميع النصوص المرئية في الصورة. أولاً النصوص بالعربية ثم الإنجليزية. إذا لا يوجد نص قل: لا يوجد نص'
+      );
       if (!text) {
-        console.log('[Read] Gemini failed, trying Groq...');
-        text = await groqVision(
-          frame.base64,
-          'اقرأ جميع النصوص المرئية في الصورة. أولاً النصوص بالعربية ثم الإنجليزية. إذا لا يوجد نص قل: لا يوجد نص'
-        );
+        console.log('[Read] Groq failed, trying Gemini...');
+        text = await geminiReadText(frame.base64);
       }
       if (epoch.current !== myEpoch) return;
       syncRateLimitState();
@@ -863,14 +899,14 @@ export default function App() {
       const frame = await grabFrame(camRef, 768, 0.40);
       if (epoch.current !== myEpoch) return;
 
-      // Try Gemini first (best quality), fallback to Groq
-      let desc = await geminiDescribeScene(frame.base64, frame.width, frame.height);
+      // Try Groq first (reliable, no quota limits), fallback to Gemini
+      let desc = await groqVision(
+        frame.base64,
+        'صف المشهد بالعربية في 2 إلى 3 جمل قصيرة ومفيدة للمكفوفين. اذكر نوع المكان إن أمكن، أهم الأشياء، وأي ملاحظات مهمة للحركة أو السلامة. لا تطل كثيراً.'
+      );
       if (!desc) {
-        console.log('[Describe] Gemini failed, trying Groq...');
-        desc = await groqVision(
-          frame.base64,
-          'صف المشهد في جملة واحدة قصيرة ومفيدة للمكفوفين بالعربية فقط.'
-        );
+        console.log('[Describe] Groq failed, trying Gemini...');
+        desc = await geminiDescribeScene(frame.base64, frame.width, frame.height);
       }
       if (epoch.current !== myEpoch) return;
       syncRateLimitState();
@@ -952,12 +988,13 @@ export default function App() {
     setScanning(true);
     try {
       console.log('[Currency] grabbing frame...');
-      const frame = await grabFrame(camRef, 800, 0.45);
+      const frame = await grabFrame(camRef, 1024, 0.75);
       if (epoch.current !== myEpoch) return;
       const result = await groqVision(
         frame.base64,
-        'Identify Tunisian currency only. Reply with ONLY ONE of these Arabic values: 100 مليم, 200 مليم, 500 مليم, 1 دينار, 2 دينار, 5 دينار, 10 دينار, 20 دينار, 50 دينار. If no Tunisian currency is visible, reply: لا يوجد نقد. No explanation.',
-        GROQ_CURRENCY_MODELS
+        'You are identifying Tunisian money. Reply with ONLY ONE short value from this list: 100 مليم, 200 مليم, 500 مليم, 1 دينار, 2 دينار, 5 دينار, 10 دينار, 20 دينار, 50 دينار. If unsure or no Tunisian money is visible, reply exactly: لا يوجد نقد. No explanation.',
+        GROQ_CURRENCY_MODELS,
+        50
       );
       if (epoch.current !== myEpoch) return;
       syncRateLimitState();
@@ -974,8 +1011,12 @@ export default function App() {
         '10 دينار','20 دينار','50 دينار'
       ];
 
+      // Extract the allowed value from result (in case it contains extra text)
       const clean = allowed.find((v) => (result || '').includes(v));
-      if (!clean) return;
+      if (!clean) {
+        console.log('[Currency] no valid currency detected');
+        return;
+      }
       if (clean === prevKey.current && now - lastSpoke.current < 15000) return;
       prevKey.current = clean;
       lastSpoke.current = now;
@@ -1070,16 +1111,46 @@ export default function App() {
     const cleaned = t.replace(/^\s*(?:اوعمتسا|يعمتسا|عمتسا|عمتسأ|استمعوا|استمعي|استمع|أستمع)\s*/u, '').trim();
     const spoken = cleaned || t;
     const low = spoken.toLowerCase();
-    console.log('[Voice] processing:', spoken);
+    const isShakeMode = shakeVoiceModeRef.current;
+    console.log('[Voice] processing:', spoken, 'shakeMode:', isShakeMode);
 
     if (isNoisyTranscript(spoken)) {
       announce('لم أفهم، حاول مرة أخرى');
+      shakeVoiceModeRef.current = false;
       return;
     }
 
     if (SOS_WORDS.some(w => spoken.includes(w) || low.includes(w))) {
       triggerSOS();
+      shakeVoiceModeRef.current = false;
       return;
+    }
+
+    // Arabic/French/English search commands — extract target and jump to Find mode
+    const searchPatterns = [
+      /ابحث عن (.+)/u,
+      /أبحث عن (.+)/u,
+      /دور على (.+)/u,
+      /فتش على (.+)/u,
+      /search for (.+)/i,
+      /^find (.+)/i,
+    ];
+    for (const pattern of searchPatterns) {
+      const match = spoken.match(pattern);
+      if (match) {
+        const target = match[1].trim();
+        if (target) {
+          const findIdx = MODES.findIndex(mo => mo.id === 'find');
+          switchMode(findIdx);
+          setTimeout(() => {
+            setFindTgt(target);
+            announce(`جاري البحث عن: ${target}`);
+            doFind();
+        }, 300);
+          shakeVoiceModeRef.current = false;
+          return;
+        }
+      }
     }
 
     const modeAliases = {
@@ -1092,7 +1163,21 @@ export default function App() {
     for (let i = 0; i < MODES.length; i++) {
       const aliases = modeAliases[MODES[i].id] ?? [MODES[i].ar];
       if (aliases.some(a => spoken.includes(a) || low.includes(a.toLowerCase()))) {
-        switchMode(i);
+        // If in shake voice mode, auto-trigger the mode action
+        if (isShakeMode) {
+          shakeVoiceModeRef.current = false;
+          switchMode(i);
+          // Delay slightly to let switchMode complete
+          setTimeout(() => {
+            if (i === 0) doExplore();
+            else if (i === 1) doRead();
+            else if (i === 2) doDescribe();
+            else if (i === 3) { /* find: wait for target */ }
+            else if (i === 4) doCurrency();
+          }, 250);
+        } else {
+          switchMode(i);
+        }
         return;
       }
     }
@@ -1100,10 +1185,12 @@ export default function App() {
     if (mode.id === 'find') {
       setFindTgt(spoken);
       announce(`جاري البحث عن: ${spoken}`);
+      shakeVoiceModeRef.current = false;
       return;
     }
 
     announce(spoken);
+    shakeVoiceModeRef.current = false;
   }
 
   function switchMode(i) {
@@ -1275,24 +1362,6 @@ export default function App() {
 
         {/* controls */}
         <View style={s.ctrl}>
-          {/* DEBUG: inject fake detection (dev only) */}
-          {__DEV__ && (
-            <TouchableOpacity
-              style={[s.iconBtn, { backgroundColor: 'rgba(255,100,100,0.12)' }]}
-              onPress={() => {
-                const fakeFrame = { width: 640, height: 480 };
-                const fakeDet = [{
-                  label: 'person',
-                  confidence: 0.85,
-                  box: { x1: 100, y1: 80, x2: 380, y2: 420 },
-                }];
-                setDetectionOverlay(fakeFrame, fakeDet, GREEN);
-                announce('شخص أمامك');
-              }}
-            >
-              <Text style={s.iconTxt}>DBG</Text>
-            </TouchableOpacity>
-          )}
           {/* flip */}
           <TouchableOpacity style={s.iconBtn}
             onPress={() => setFacing(f => f === 'back' ? 'front' : 'back')}>
