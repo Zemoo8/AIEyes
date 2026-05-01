@@ -56,9 +56,9 @@ const TG_CHAT  = process.env.EXPO_PUBLIC_TELEGRAM_CHAT_ID ?? '8698073497';
 
 // ─── modes ────────────────────────────────────────────────────────────────────
 const MODES = [
-  { id: 'explore',  ar: 'استكشاف', hint: 'كشف تلقائي للأشياء' },
   { id: 'read',     ar: 'قراءة',   hint: 'قراءة النصوص' },
   { id: 'describe', ar: 'وصف',     hint: 'اضغط ◉ لوصف المشهد' },
+  { id: 'explore',  ar: 'استكشاف', hint: 'كشف تلقائي للأشياء' },   // index 2 — center
   { id: 'find',     ar: 'بحث',     hint: 'يبحث تلقائياً - اضغط ◉ لتحديد الهدف' },
   { id: 'currency', ar: 'عملة',    hint: 'كشف الأوراق النقدية التونسية' },
 ];
@@ -91,6 +91,13 @@ const ORANGE = C.warn;
 const RED    = C.danger;
 
 const AnimatedPath = AnimatedReanimated.createAnimatedComponent(Path);
+
+// Speech-optimised recording: mono, smaller bitrate → faster Whisper upload
+const SPEECH_RECORDING_OPTIONS = {
+  ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
+  android: { ...Audio.RecordingOptionsPresets.HIGH_QUALITY.android, numberOfChannels: 1, bitRate: 32000 },
+  ios:     { ...Audio.RecordingOptionsPresets.HIGH_QUALITY.ios,     numberOfChannels: 1, bitRate: 32000 },
+};
 
 const COCO_AR = {
   person: 'شخص',
@@ -1359,7 +1366,7 @@ const sp = StyleSheet.create({
 export default function App() {
   const [splash,    setSplash]    = useState(true);
   const [camPerm,   reqCam]       = useCameraPermissions();
-  const [modeIdx,   setModeIdx]   = useState(0);
+  const [modeIdx,   setModeIdx]   = useState(2);
   const [facing,    setFacing]    = useState('back');
   const [listening, setListening] = useState(false);
   const [findTgt,   setFindTgt]   = useState(null);
@@ -1375,13 +1382,19 @@ export default function App() {
     tone: GREEN,
   });
 
-  const camRef       = useRef(null);
-  const busy         = useRef(false);
+  const camRef        = useRef(null);
+  const modeScrollRef    = useRef(null);
+  const pillLayouts      = useRef([]);
+  const modeContentWidth = useRef(0);
+  const momentumExpected = useRef(false);
+  const initialCentered  = useRef(false);
+  const busy          = useRef(false);
   const isSpeaking   = useRef(false);
   const speakTimer   = useRef(null);
   const lastReadTxt  = useRef('');
   const loop         = useRef(null);
   const recRef              = useRef(null);
+  const stoppingRef         = useRef(false);
   const voiceAutoStopTimer  = useRef(null);
   const sosLoop             = useRef(null);
   const prevKey      = useRef('');
@@ -1464,22 +1477,19 @@ export default function App() {
 
   async function startListening(autoStopMs = null) {
     if (recRef.current) return;
+    stoppingRef.current = false; // reset in case a prior stop left it stuck
     try {
       Speech.stop();
-      const audioConfig = Platform.OS === 'ios'
-        ? {
-            allowsRecordingIOS: true,
-            playsInSilentModeIOS: true,
-            staysActiveInBackground: false,
-          }
-        : {
-            shouldDuckAndroid: false,
-            playThroughEarpiece: false,
-          };
-      await Audio.setAudioModeAsync(audioConfig);
-      const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
+      // Brief pause so any in-flight TTS audio finishes before the mic opens
+      await new Promise(r => setTimeout(r, 150));
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: false,
+        shouldDuckAndroid: true,
+        playThroughEarpiece: false,
+      });
+      const { recording } = await Audio.Recording.createAsync(SPEECH_RECORDING_OPTIONS);
       recRef.current = recording;
       setListening(true);
       console.log('[Mic] recording started');
@@ -1497,14 +1507,30 @@ export default function App() {
   }
 
   async function stopListeningAndProcess() {
+    // Prevent double-stop: auto-stop timer and manual press can race
+    if (stoppingRef.current) return;
+    stoppingRef.current = true;
+
     clearTimeout(voiceAutoStopTimer.current);
+    voiceAutoStopTimer.current = null;
     setListening(false);
+
+    // Atomically take ownership of the recording so no other caller can grab it
+    const rec = recRef.current;
+    recRef.current = null;
+
     try {
-      const current = recRef.current;
-      const uri = current?.getURI();
-      if (current) await current.stopAndUnloadAsync();
-      recRef.current = null;
-      console.log('[Mic] recording stopped, uri:', uri);
+      if (!rec) {
+        console.log('[Mic] stopListeningAndProcess: no recording in ref');
+        announce('لم يُسجَّل صوت');
+        return;
+      }
+      // Grab URI before unloading — unavailable after stopAndUnloadAsync on some platforms
+      const uri = rec.getURI();
+      console.log('[Mic] stopping recording, uri:', uri);
+      try { await rec.stopAndUnloadAsync(); } catch (unloadErr) {
+        console.log('[Mic] unload warning (non-fatal):', unloadErr?.message);
+      }
       if (!uri) { announce('لم يُسجَّل صوت'); return; }
       announce('جاري التعرف على الصوت');
       const raw = await groqWhisper(uri);
@@ -1519,7 +1545,29 @@ export default function App() {
       announce('تعذّر التعرف على الصوت');
     } finally {
       setListening(false);
+      stoppingRef.current = false;
     }
+  }
+
+  function centerActiveMode(idx = modeIdx, animated = true) {
+    const layout = pillLayouts.current[idx];
+    if (!layout || !modeScrollRef.current) return;
+    const targetX = layout.x + layout.width / 2 - SW / 2;
+    const maxScrollX = Math.max(0, modeContentWidth.current - SW);
+    const x = Math.min(Math.max(0, targetX), maxScrollX);
+    modeScrollRef.current.scrollTo({ x, animated });
+  }
+
+  function handleModeScrollEnd(e) {
+    const scrollX = e.nativeEvent.contentOffset.x;
+    const center  = scrollX + SW / 2;
+    let closest = 0, closestDist = Infinity;
+    pillLayouts.current.forEach((layout, i) => {
+      if (!layout) return;
+      const dist = Math.abs((layout.x + layout.width / 2) - center);
+      if (dist < closestDist) { closestDist = dist; closest = i; }
+    });
+    switchMode(closest);
   }
 
   function beginAiTask() {
@@ -1615,18 +1663,28 @@ export default function App() {
     Animated.loop(Animated.timing(scanAnim, { toValue: 1, duration: 1600, useNativeDriver: true })).start();
   }, [scanning]);
 
-  // ── accelerometer: double shake (within 1200ms) → open voice control ──
+  // ── center active mode in camera carousel ──
+  useEffect(() => {
+    const t = setTimeout(() => centerActiveMode(modeIdx), 80);
+    return () => clearTimeout(t);
+  }, [modeIdx]);
+
+  // ── accelerometer: double shake (within 2 s) → open voice control ──
   useEffect(() => {
     Accelerometer.setUpdateInterval(100);
     let prev = { x: 0, y: 0, z: 0 };
     let shakeCount = 0;
+    let shakeCooldown = 0; // timestamp before which further triggers are ignored
 
     const sub = Accelerometer.addListener(({ x, y, z }) => {
       const delta = Math.sqrt((x - prev.x) ** 2 + (y - prev.y) ** 2 + (z - prev.z) ** 2);
       prev = { x, y, z };
 
-      if (delta > 7) {
+      if (delta > 4.5) {
         const now = Date.now();
+
+        // Ignore all shakes during the post-trigger cooldown period
+        if (now < shakeCooldown) return;
 
         if (now - lastShake.current < 2000) {
           shakeCount++;
@@ -1642,10 +1700,11 @@ export default function App() {
 
         if (shakeCount === 2) {
           console.log('[Shake] second shake → voice control mode');
+          shakeCount = 0;
+          shakeCooldown = now + 3000; // 3 s cooldown prevents accidental re-trigger
           Vibration.vibrate(100);
           shakeVoiceModeRef.current = true;
           startListening(3500);
-          shakeCount = 0;
         }
       }
     });
@@ -2262,17 +2321,45 @@ export default function App() {
         <View style={s.sheetHandle} />
         <Text style={s.hint}>{mode.hint}</Text>
 
-        {/* mode pills */}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}
-          style={s.pillRow} contentContainerStyle={s.pillContent}>
-          {MODES.map((m, i) => (
-            <TouchableOpacity key={m.id}
-              style={[s.pill, i === modeIdx && s.pillOn]}
-              onPress={() => switchMode(i)}>
-              <Text style={[s.pillTxt, i === modeIdx && s.pillTxtOn]}>{m.ar}</Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
+        {/* iPhone-style mode dial */}
+        <View style={s.cameraModeWrap}>
+          <ScrollView
+            ref={modeScrollRef}
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            decelerationRate="fast"
+            contentContainerStyle={s.cameraModeContent}
+            onContentSizeChange={(w) => {
+              modeContentWidth.current = w;
+              if (!initialCentered.current) {
+                // Defer one tick so all child onLayout callbacks have fired first
+                setTimeout(() => {
+                  initialCentered.current = true;
+                  centerActiveMode(2, false);
+                }, 0);
+              }
+            }}
+            onScrollBeginDrag={() => { momentumExpected.current = false; }}
+            onMomentumScrollBegin={() => { momentumExpected.current = true; }}
+            onScrollEndDrag={(e) => { if (!momentumExpected.current) handleModeScrollEnd(e); }}
+            onMomentumScrollEnd={handleModeScrollEnd}>
+            {MODES.map((m, i) => {
+              const active = i === modeIdx;
+              return (
+                <TouchableOpacity
+                  key={m.id}
+                  activeOpacity={0.75}
+                  onPress={() => switchMode(i)}
+                  onLayout={(e) => { pillLayouts.current[i] = e.nativeEvent.layout; }}
+                  style={[s.cameraModeItem, active && s.cameraModeItemActive]}>
+                  <Text style={[s.cameraModeText, active && s.cameraModeTextActive]}>
+                    {m.ar}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
 
         {/* controls */}
         <View style={s.ctrl}>
@@ -2484,7 +2571,7 @@ const s = StyleSheet.create({
 
   // pills
   pillRow:     {},
-  pillContent: { paddingHorizontal: 14, gap: 8, paddingBottom: 2 },
+  pillContent: { paddingHorizontal: SW / 2, gap: 8, paddingBottom: 2 },
   pill: {
     paddingHorizontal: 18, paddingVertical: 9, borderRadius: 22,
     backgroundColor: 'rgba(120, 109, 255, 0.08)',
@@ -2496,6 +2583,40 @@ const s = StyleSheet.create({
   },
   pillTxt:   { color: C.textSec, fontSize: 14, fontWeight: '500' },
   pillTxtOn: { color: C.bg, fontWeight: '700' },
+
+  // camera-style mode dial
+  cameraModeWrap: {
+    height: 48,
+    justifyContent: 'center',
+    marginBottom: 6,
+    overflow: 'visible',
+  },
+  cameraModeContent: {
+    paddingHorizontal: SW / 2,
+    alignItems: 'center',
+    gap: 20,
+  },
+  cameraModeItem: {
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    opacity: 0.4,
+  },
+  cameraModeItemActive: {
+    opacity: 1,
+  },
+  cameraModeText: {
+    fontSize: 13,
+    color: C.textMuted,
+    fontWeight: '500',
+  },
+  cameraModeTextActive: {
+    fontSize: 17,
+    color: C.textPri,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
 
   // controls
   ctrl: {
