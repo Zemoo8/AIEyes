@@ -1,15 +1,42 @@
-﻿import React, { useState, useEffect, useRef } from 'react';
+﻿import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   StyleSheet, View, Text, TouchableOpacity, Pressable,
-  ScrollView, Animated, Dimensions, Platform,
+  ScrollView, Animated, Easing, Dimensions, Platform,
   ActivityIndicator, Vibration,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import { LinearGradient } from 'expo-linear-gradient';
+import {
+  Canvas,
+  Circle as SkiaCircle,
+  Fill as SkiaFill,
+  Group as SkiaGroup,
+  Paint as SkiaPaint,
+  Path as SkiaPath,
+  Rect as SkiaRect,
+  Blur as SkiaBlur,
+  Skia,
+  vec,
+} from '@shopify/react-native-skia';
 import * as Speech from 'expo-speech';
 import * as Location from 'expo-location';
 import { Accelerometer } from 'expo-sensors';
 import { Audio } from 'expo-av';
 import { StatusBar } from 'expo-status-bar';
+import Svg, { Defs, G, Path, Circle, Rect, Stop, LinearGradient as SvgLinearGradient } from 'react-native-svg';
+import AnimatedReanimated, {
+  Easing as ReanimatedEasing,
+  cancelAnimation,
+  interpolate,
+  runOnJS,
+  useAnimatedProps,
+  useAnimatedStyle,
+  useSharedValue,
+  withDelay,
+  withRepeat,
+  withSequence,
+  withTiming,
+} from 'react-native-reanimated';
 import { supabase } from './utils/supabase';
 import { detectObjects } from './utils/api';
 import {
@@ -41,9 +68,29 @@ const SOS_WORDS = [
   'خطر', 'الله', 'يا ناس',
   'help', 'help me', 'urgence', 'urgent', 'sos',
 ];
-const GREEN = '#22c55e';
-const ORANGE = '#f97316';
-const RED   = '#ef4444';
+const C = {
+  bg:          '#090814',
+  surface:     '#151331',
+  glass:       'rgba(18, 16, 41, 0.94)',
+  primary:     '#786dff',
+  primaryGlow: 'rgba(120, 109, 255, 0.36)',
+  primaryDim:  'rgba(120, 109, 255, 0.12)',
+  found:       '#9b92ff',
+  foundGlow:   'rgba(155, 146, 255, 0.30)',
+  danger:      '#FF3062',
+  dangerGlow:  'rgba(255, 48, 98, 0.38)',
+  warn:        '#ffb86b',
+  warnDim:     'rgba(255, 184, 107, 0.16)',
+  textPri:     '#F4F3FF',
+  textSec:     'rgba(214, 210, 255, 0.80)',
+  textMuted:   'rgba(151, 145, 203, 0.48)',
+  border:      'rgba(120, 109, 255, 0.18)',
+};
+const GREEN  = C.found;
+const ORANGE = C.warn;
+const RED    = C.danger;
+
+const AnimatedPath = AnimatedReanimated.createAnimatedComponent(Path);
 
 const COCO_AR = {
   person: 'شخص',
@@ -405,53 +452,907 @@ async function groqWhisper(audioUri) {
 }
 
 // ─────────────────────────── Splash ──────────────────────────────────────────
-function Splash({ onDone }) {
-  const zY  = useRef(new Animated.Value(-240)).current;
-  const exX = useRef(new Animated.Value(220)).current;
-  const lnW = useRef(new Animated.Value(0)).current;
-  const arO = useRef(new Animated.Value(0)).current;
-  const byO = useRef(new Animated.Value(0)).current;
-  const scO = useRef(new Animated.Value(1)).current;
+const LOGO_SIZE = 180;
+const SP_EM   = '#7a6cff';
+const SP_NEON = '#c9c2ff';
+const SP_CY   = '#f5f3ff';
+const SP_BG   = '#060611';
+const Z_PATH = 'M 48 50 H 126 L 58 88 H 126 L 48 126';
+const EYE_PATH = 'M 24 88 L 46 56 L 84 40 L 130 47 L 152 88 L 130 129 L 84 136 L 46 120 Z';
+const INNER_EYE_PATH = 'M 40 88 L 56 68 L 84 60 L 116 66 L 136 88 L 116 110 L 84 116 L 56 108 Z';
 
-  useEffect(() => {
-    Animated.sequence([
-      Animated.spring(zY, { toValue: 0, friction: 5, tension: 48, useNativeDriver: true }),
-      Animated.parallel([
-        Animated.timing(exX, { toValue: 0,   duration: 340, useNativeDriver: true }),
-        Animated.timing(lnW, { toValue: 270,  duration: 520, useNativeDriver: false }),
-      ]),
-      Animated.parallel([
-        Animated.timing(arO, { toValue: 1, duration: 400, useNativeDriver: true }),
-        Animated.timing(byO, { toValue: 1, duration: 400, useNativeDriver: true }),
-      ]),
-      Animated.delay(1200),
-      Animated.timing(scO, { toValue: 0, duration: 520, useNativeDriver: true }),
-    ]).start(onDone);
-  }, []);
-
+function SkiaBackdrop() {
   return (
-    <Animated.View style={[sp.root, { opacity: scO }]}>
-      <View style={sp.box}>
-        <View style={sp.row}>
-          <Animated.Text style={[sp.Z,    { transform: [{ translateY: zY }] }]}>Z</Animated.Text>
-          <Animated.Text style={[sp.emoo, { transform: [{ translateX: exX }] }]}>emoo</Animated.Text>
-        </View>
-        <Animated.View style={[sp.line, { width: lnW }]} />
-        <Animated.Text style={[sp.ar, { opacity: arO }]}>عيون الذكاء</Animated.Text>
-        <Animated.Text style={[sp.by, { opacity: byO }]}>by Zemoo</Animated.Text>
-      </View>
-    </Animated.View>
+    <Canvas style={StyleSheet.absoluteFill} opaque>
+      <SkiaFill color={SP_BG} />
+
+      <SkiaGroup layer={<SkiaPaint><SkiaBlur blur={52} /></SkiaPaint>} blendMode="screen">
+        <SkiaCircle cx={SW * 0.5} cy={SH * 0.46} r={240} color="rgba(120,109,255,0.20)" />
+        <SkiaCircle cx={SW * 0.5} cy={SH * 0.49} r={150} color="rgba(201,194,255,0.24)" />
+        <SkiaCircle cx={SW * 0.48} cy={SH * 0.53} r={92} color="rgba(245,243,255,0.44)" />
+        <SkiaCircle cx={SW * 0.28} cy={SH * 0.26} r={170} color="rgba(98,76,255,0.10)" />
+        <SkiaCircle cx={SW * 0.74} cy={SH * 0.28} r={160} color="rgba(135,126,255,0.12)" />
+        <SkiaCircle cx={SW * 0.5} cy={SH * 0.75} r={165} color="rgba(120,109,255,0.08)" />
+      </SkiaGroup>
+
+      <SkiaGroup origin={vec(SW / 2, SH * 0.48)} transform={[{ rotate: -0.22 }]} opacity={0.88}>
+        <SkiaRect x={-SW * 0.34} y={SH * 0.50} width={SW * 1.68} height={7} radius={999} color="rgba(120,109,255,0.24)" />
+        <SkiaRect x={-SW * 0.26} y={SH * 0.38} width={SW * 1.52} height={4} radius={999} color="rgba(201,194,255,0.18)" />
+        <SkiaRect x={-SW * 0.30} y={SH * 0.60} width={SW * 1.58} height={5} radius={999} color="rgba(98,76,255,0.16)" />
+        <SkiaRect x={SW * 0.06} y={SH * 0.14} width={8} height={SH * 0.50} radius={999} color="rgba(245,243,255,0.08)" />
+      </SkiaGroup>
+
+      <SkiaGroup origin={vec(SW / 2, SH * 0.5)}>
+        <SkiaCircle cx={SW / 2} cy={SH * 0.5} r={116} color="rgba(120,109,255,0.16)" />
+        <SkiaCircle cx={SW / 2} cy={SH * 0.5} r={78} color="rgba(201,194,255,0.12)" />
+        <SkiaCircle cx={SW / 2} cy={SH * 0.5} r={34} color="rgba(245,243,255,0.90)" />
+        <SkiaCircle cx={SW / 2} cy={SH * 0.5} r={16} color="rgba(255,255,255,0.94)" />
+      </SkiaGroup>
+    </Canvas>
   );
 }
+
+const SPLASH_LOTTIE = {
+  v: '5.10.0',
+  fr: 60,
+  ip: 0,
+  op: 180,
+  w: 1080,
+  h: 1920,
+  nm: 'AIEyes Reactor',
+  ddd: 0,
+  assets: [],
+  layers: [
+    {
+      ty: 4,
+      nm: 'reactor ring',
+      sr: 1,
+      ks: {
+        o: { a: 1, k: [{ t: 0, s: [0] }, { t: 16, s: [100] }, { t: 150, s: [100] }, { t: 180, s: [0] }] },
+        r: { a: 1, k: [{ t: 0, s: [0] }, { t: 180, s: [360] }] },
+        p: { a: 0, k: [540, 960, 0] },
+        a: { a: 0, k: [0, 0, 0] },
+        s: { a: 0, k: [100, 100, 100] },
+      },
+      ao: 0,
+      shapes: [
+        {
+          ty: 'gr',
+          it: [
+            { ty: 'el', p: { a: 0, k: [0, 0] }, s: { a: 0, k: [760, 760] }, nm: 'ring ellipse' },
+            { ty: 'st', c: { a: 0, k: [0.137, 0.961, 0.533, 1] }, o: { a: 0, k: 60 }, w: { a: 0, k: 4 }, lc: 2, lj: 2, ml: 4, nm: 'ring stroke' },
+            { ty: 'tr', p: { a: 0, k: [0, 0] }, a: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 }, sk: { a: 0, k: 0 }, sa: { a: 0, k: 0 } },
+          ],
+        },
+      ],
+    },
+    {
+      ty: 4,
+      nm: 'slash beam',
+      sr: 1,
+      ks: {
+        o: { a: 1, k: [{ t: 0, s: [0] }, { t: 8, s: [100] }, { t: 20, s: [100] }, { t: 40, s: [0] }] },
+        r: { a: 0, k: -13 },
+        p: { a: 1, k: [{ t: 0, s: [140, 890, 0] }, { t: 40, s: [540, 960, 0] }, { t: 84, s: [940, 1030, 0] }, { t: 140, s: [1180, 1080, 0] }] },
+        a: { a: 0, k: [0, 0, 0] },
+        s: { a: 1, k: [{ t: 0, s: [12, 12, 100] }, { t: 14, s: [132, 132, 100] }, { t: 28, s: [108, 108, 100] }, { t: 40, s: [24, 24, 100] }] },
+      },
+      ao: 0,
+      shapes: [
+        {
+          ty: 'gr',
+          it: [
+            { ty: 'rc', p: { a: 0, k: [0, 0] }, s: { a: 0, k: [1240, 18] }, r: { a: 0, k: 9 }, nm: 'beam rect' },
+            { ty: 'fl', c: { a: 0, k: [0.227, 1, 0.533, 1] }, o: { a: 0, k: 100 }, nm: 'beam fill' },
+            { ty: 'tr', p: { a: 0, k: [0, 0] }, a: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 }, sk: { a: 0, k: 0 }, sa: { a: 0, k: 0 } },
+          ],
+        },
+      ],
+    },
+    {
+      ty: 4,
+      nm: 'core pulse',
+      sr: 1,
+      ks: {
+        o: { a: 1, k: [{ t: 0, s: [0] }, { t: 16, s: [90] }, { t: 90, s: [100] }, { t: 154, s: [86] }, { t: 180, s: [0] }] },
+        r: { a: 0, k: 0 },
+        p: { a: 0, k: [540, 960, 0] },
+        a: { a: 0, k: [0, 0, 0] },
+        s: { a: 1, k: [{ t: 0, s: [40, 40, 100] }, { t: 24, s: [118, 118, 100] }, { t: 88, s: [104, 104, 100] }, { t: 140, s: [132, 132, 100] }, { t: 180, s: [86, 86, 100] }] },
+      },
+      ao: 0,
+      shapes: [
+        {
+          ty: 'gr',
+          it: [
+            { ty: 'el', p: { a: 0, k: [0, 0] }, s: { a: 0, k: [190, 190] }, nm: 'core ellipse' },
+            { ty: 'fl', c: { a: 0, k: [0.137, 0.961, 0.533, 1] }, o: { a: 0, k: 85 }, nm: 'core fill' },
+            { ty: 'tr', p: { a: 0, k: [0, 0] }, a: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 }, sk: { a: 0, k: 0 }, sa: { a: 0, k: 0 } },
+          ],
+        },
+      ],
+    },
+    {
+      ty: 4,
+      nm: 'glitch band 1',
+      sr: 1,
+      ks: {
+        o: { a: 1, k: [{ t: 0, s: [0] }, { t: 28, s: [0] }, { t: 40, s: [100] }, { t: 58, s: [0] }, { t: 180, s: [0] }] },
+        r: { a: 0, k: -18 },
+        p: { a: 1, k: [{ t: 0, s: [160, 760, 0] }, { t: 44, s: [540, 790, 0] }, { t: 78, s: [920, 820, 0] }, { t: 180, s: [1000, 840, 0] }] },
+        a: { a: 0, k: [0, 0, 0] },
+        s: { a: 0, k: [100, 100, 100] },
+      },
+      ao: 0,
+      shapes: [{ ty: 'gr', it: [{ ty: 'rc', p: { a: 0, k: [0, 0] }, s: { a: 0, k: [1180, 8] }, r: { a: 0, k: 999 } }, { ty: 'fl', c: { a: 0, k: [0.137, 0.961, 0.533, 1] }, o: { a: 0, k: 78 } }, { ty: 'tr', p: { a: 0, k: [0, 0] }, a: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 }, sk: { a: 0, k: 0 }, sa: { a: 0, k: 0 } }] }],
+    },
+    {
+      ty: 4,
+      nm: 'glitch band 2',
+      sr: 1,
+      ks: {
+        o: { a: 1, k: [{ t: 0, s: [0] }, { t: 42, s: [0] }, { t: 52, s: [100] }, { t: 70, s: [0] }, { t: 180, s: [0] }] },
+        r: { a: 0, k: 11 },
+        p: { a: 1, k: [{ t: 0, s: [960, 980, 0] }, { t: 54, s: [540, 990, 0] }, { t: 88, s: [140, 1000, 0] }, { t: 180, s: [40, 1010, 0] }] },
+        a: { a: 0, k: [0, 0, 0] },
+        s: { a: 0, k: [100, 100, 100] },
+      },
+      ao: 0,
+      shapes: [{ ty: 'gr', it: [{ ty: 'rc', p: { a: 0, k: [0, 0] }, s: { a: 0, k: [1180, 6] }, r: { a: 0, k: 999 } }, { ty: 'fl', c: { a: 0, k: [0.243, 0.953, 1, 1] }, o: { a: 0, k: 70 } }, { ty: 'tr', p: { a: 0, k: [0, 0] }, a: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 }, sk: { a: 0, k: 0 }, sa: { a: 0, k: 0 } }] }],
+    },
+  ],
+};
+
+function Splash({ onDone }) {
+  // Phase 1 — black screen, then laser slash
+  const slash = useSharedValue(0);
+  const streakA = useSharedValue(0);
+  const streakB = useSharedValue(0);
+  const streakC = useSharedValue(0);
+
+  // Ambient motion — makes the intro feel alive instead of static.
+  const cameraDrift = useSharedValue(0);
+  const orbitSpin = useSharedValue(0);
+  const orbitPulse = useSharedValue(0);
+  const glitchBurst = useSharedValue(0);
+
+  // Phase 2 — Z glitches into existence
+  const zReveal = useSharedValue(0);
+  const zJitter = useSharedValue(0);
+
+  // Phase 3 — angular eye frame draws around the Z
+  const frameReveal = useSharedValue(0);
+  const coreReveal = useSharedValue(0);
+  const corePulse = useSharedValue(0);
+
+  // Phase 4 — scanline, flash, and text reveal
+  const scanReveal = useSharedValue(0);
+  const flashReveal = useSharedValue(0);
+  const textOne = useSharedValue(0);
+  const textTwo = useSharedValue(0);
+  const textThree = useSharedValue(0);
+
+  // Phase 5 — cinematic fade/zoom exit
+  const rootOpacity = useSharedValue(1);
+  const rootScale = useSharedValue(1);
+
+  const rootStyle = useAnimatedStyle(() => ({
+    opacity: rootOpacity.value,
+    transform: [
+      { translateY: interpolate(cameraDrift.value, [0, 1], [10, -8]) },
+      { translateX: interpolate(cameraDrift.value, [0, 1], [-4, 5]) },
+      { rotate: `${interpolate(cameraDrift.value, [0, 1], [-0.35, 0.35])}deg` },
+      { scale: rootScale.value },
+    ],
+  }));
+
+  const slashStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(slash.value, [0, 0.12, 1], [0, 1, 0]),
+    transform: [
+      { translateX: interpolate(slash.value, [0, 1], [-SW * 0.42, SW * 0.24]) },
+      { scaleX: interpolate(slash.value, [0, 1], [0.16, 1]) },
+      { rotate: '-13deg' },
+    ],
+  }));
+
+  const streak1Style = useAnimatedStyle(() => ({
+    opacity: interpolate(streakA.value, [0, 0.08, 0.72, 1], [0, 1, 0.95, 0]),
+    transform: [
+      { translateX: interpolate(streakA.value, [0, 1], [-SW * 0.56, SW * 0.9]) },
+      { translateY: -4 },
+      { skewX: '-17deg' },
+    ],
+    top: SH * 0.36,
+  }));
+
+  const streak2Style = useAnimatedStyle(() => ({
+    opacity: interpolate(streakB.value, [0, 0.08, 0.72, 1], [0, 1, 0.95, 0]),
+    transform: [
+      { translateX: interpolate(streakB.value, [0, 1], [-SW * 0.56, SW * 0.9]) },
+      { translateY: 0 },
+      { skewX: '-21deg' },
+    ],
+    top: SH * 0.50,
+  }));
+
+  const streak3Style = useAnimatedStyle(() => ({
+    opacity: interpolate(streakC.value, [0, 0.08, 0.72, 1], [0, 1, 0.95, 0]),
+    transform: [
+      { translateX: interpolate(streakC.value, [0, 1], [-SW * 0.56, SW * 0.9]) },
+      { translateY: 5 },
+      { skewX: '-14deg' },
+    ],
+    top: SH * 0.64,
+  }));
+
+  const logoStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(zReveal.value, [0, 0.12, 1], [0, 1, 1]),
+    transform: [
+      { translateX: interpolate(zJitter.value, [0, 1], [0, 6]) },
+      { translateY: interpolate(zJitter.value, [0, 1], [0, -1]) },
+      { scale: interpolate(zReveal.value, [0, 1], [1.16, 1]) },
+    ],
+  }));
+
+  const glowStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(frameReveal.value, [0, 0.2, 1], [0, 0.28, 0.95]),
+    transform: [{ scale: interpolate(orbitPulse.value, [0, 1], [0.92, 1.14]) }],
+  }));
+
+  const flashStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(flashReveal.value, [0, 0.2, 0.55, 1], [0, 0.98, 0.34, 0]),
+  }));
+
+  const lottieStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(frameReveal.value, [0, 0.14, 0.72, 1], [0, 1, 0.9, 0.18]),
+    transform: [
+      { scale: interpolate(corePulse.value, [0, 1], [1.08, 0.98]) },
+      { rotate: `${interpolate(cameraDrift.value, [0, 1], [-1.5, 1.5])}deg` },
+    ],
+  }));
+
+  const burstStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(glitchBurst.value, [0, 0.12, 0.55, 1], [0, 1, 0.52, 0]),
+  }));
+
+  const burstTop1 = useAnimatedStyle(() => ({
+    opacity: interpolate(glitchBurst.value, [0, 0.12, 0.55, 1], [0, 0.95, 0.45, 0]),
+    transform: [
+      { translateX: interpolate(glitchBurst.value, [0, 1], [-SW * 0.48, SW * 0.28]) },
+      { scaleX: interpolate(glitchBurst.value, [0, 1], [0.2, 1.05]) },
+      { skewX: '-22deg' },
+    ],
+    top: SH * 0.28,
+  }));
+
+  const burstTop2 = useAnimatedStyle(() => ({
+    opacity: interpolate(glitchBurst.value, [0, 0.1, 0.5, 1], [0, 1, 0.36, 0]),
+    transform: [
+      { translateX: interpolate(glitchBurst.value, [0, 1], [SW * 0.22, -SW * 0.24]) },
+      { scaleX: interpolate(glitchBurst.value, [0, 1], [0.15, 1.12]) },
+      { skewX: '16deg' },
+    ],
+    top: SH * 0.42,
+  }));
+
+  const burstTop3 = useAnimatedStyle(() => ({
+    opacity: interpolate(glitchBurst.value, [0, 0.15, 0.6, 1], [0, 0.88, 0.42, 0]),
+    transform: [
+      { translateX: interpolate(glitchBurst.value, [0, 1], [-SW * 0.18, SW * 0.36]) },
+      { scaleX: interpolate(glitchBurst.value, [0, 1], [0.18, 0.92]) },
+      { skewX: '-12deg' },
+    ],
+    top: SH * 0.59,
+  }));
+
+  const ringStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(frameReveal.value, [0, 0.2, 1], [0, 0.3, 1]),
+    transform: [
+      { rotate: `${interpolate(orbitSpin.value, [0, 1], [0, 360])}deg` },
+      { scale: interpolate(orbitPulse.value, [0, 1], [0.92, 1.05]) },
+    ],
+  }));
+
+  const ringDotStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(frameReveal.value, [0, 0.25, 1], [0, 0.7, 1]),
+    transform: [
+      { rotate: `${interpolate(orbitSpin.value, [0, 1], [0, 360])}deg` },
+      { translateX: 72 },
+    ],
+  }));
+
+  const ringDotInnerStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(frameReveal.value, [0, 0.25, 1], [0, 0.55, 0.95]),
+    transform: [
+      { rotate: `${interpolate(orbitSpin.value, [0, 1], [0, -360])}deg` },
+      { translateX: 48 },
+    ],
+  }));
+
+  const scanStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(scanReveal.value, [0, 0.08, 1], [0, 1, 0]),
+    transform: [
+      { translateX: interpolate(scanReveal.value, [0, 1], [-70, LOGO_SIZE + 70]) },
+      { rotate: '-8deg' },
+    ],
+  }));
+
+  const textOneStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(textOne.value, [0, 1], [0, 1]),
+    transform: [{ translateY: interpolate(textOne.value, [0, 1], [18, 0]) }],
+  }));
+  const textTwoStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(textTwo.value, [0, 1], [0, 1]),
+    transform: [{ translateY: interpolate(textTwo.value, [0, 1], [16, 0]) }],
+  }));
+  const textThreeStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(textThree.value, [0, 1], [0, 1]),
+    transform: [{ translateY: interpolate(textThree.value, [0, 1], [14, 0]) }],
+  }));
+
+  const frameAnimatedProps = useAnimatedProps(() => ({
+    strokeDashoffset: 620 * (1 - frameReveal.value),
+    opacity: interpolate(frameReveal.value, [0, 0.1, 1], [0, 1, 1]),
+  }));
+
+  const innerFrameAnimatedProps = useAnimatedProps(() => ({
+    strokeDashoffset: 420 * (1 - frameReveal.value),
+    opacity: interpolate(frameReveal.value, [0, 0.2, 1], [0, 0.55, 0.85]),
+  }));
+
+  useEffect(() => {
+    const easeOut = ReanimatedEasing.out(ReanimatedEasing.cubic);
+    const easeIn = ReanimatedEasing.in(ReanimatedEasing.quad);
+    const easeBack = ReanimatedEasing.out(ReanimatedEasing.back(1.35));
+
+    slash.value = 0;
+    streakA.value = 0;
+    streakB.value = 0;
+    streakC.value = 0;
+    cameraDrift.value = 0;
+    orbitSpin.value = 0;
+    orbitPulse.value = 0;
+    glitchBurst.value = 0;
+    zReveal.value = 0;
+    zJitter.value = 0;
+    frameReveal.value = 0;
+    coreReveal.value = 0;
+    corePulse.value = 0;
+    scanReveal.value = 0;
+    flashReveal.value = 0;
+    textOne.value = 0;
+    textTwo.value = 0;
+    textThree.value = 0;
+    rootOpacity.value = 1;
+    rootScale.value = 1;
+
+    cameraDrift.value = withRepeat(
+      withSequence(
+        withTiming(1, { duration: 1400, easing: ReanimatedEasing.inOut(ReanimatedEasing.sin) }),
+        withTiming(0, { duration: 1400, easing: ReanimatedEasing.inOut(ReanimatedEasing.sin) })
+      ),
+      -1,
+      false
+    );
+    orbitSpin.value = withRepeat(
+      withTiming(1, { duration: 2600, easing: ReanimatedEasing.linear }),
+      -1,
+      false
+    );
+    orbitPulse.value = withRepeat(
+      withSequence(
+        withTiming(1, { duration: 900, easing: ReanimatedEasing.inOut(ReanimatedEasing.sin) }),
+        withTiming(0, { duration: 900, easing: ReanimatedEasing.inOut(ReanimatedEasing.sin) })
+      ),
+      -1,
+      false
+    );
+    glitchBurst.value = withDelay(910, withSequence(
+      withTiming(1, { duration: 70, easing: easeOut }),
+      withTiming(0.35, { duration: 40, easing: easeIn }),
+      withTiming(1, { duration: 55, easing: easeOut }),
+      withTiming(0, { duration: 160, easing: easeIn })
+    ));
+
+    // Phase 1 — a hard emerald slash establishes the brand tone.
+    slash.value = withSequence(
+      withTiming(1, { duration: 92, easing: easeOut }),
+      withTiming(0, { duration: 120, easing: easeIn })
+    );
+
+    // Phase 2 — staggered scan streaks sweep across the frame.
+    streakA.value = withDelay(150, withSequence(
+      withTiming(1, { duration: 180, easing: easeOut }),
+      withTiming(0, { duration: 100, easing: easeIn })
+    ));
+    streakB.value = withDelay(205, withSequence(
+      withTiming(1, { duration: 190, easing: easeOut }),
+      withTiming(0, { duration: 100, easing: easeIn })
+    ));
+    streakC.value = withDelay(255, withSequence(
+      withTiming(1, { duration: 190, easing: easeOut }),
+      withTiming(0, { duration: 110, easing: easeIn })
+    ));
+
+    // Phase 3 — the Z glitches in with chromatic jitter.
+    zReveal.value = withDelay(430, withSequence(
+      withTiming(0.18, { duration: 28 }),
+      withTiming(1, { duration: 92, easing: easeBack }),
+      withTiming(0.78, { duration: 42 }),
+      withTiming(1, { duration: 72, easing: easeOut })
+    ));
+    zJitter.value = withDelay(430, withSequence(
+      withTiming(0, { duration: 22 }),
+      withTiming(1, { duration: 18 }),
+      withTiming(0.18, { duration: 16 }),
+      withTiming(1, { duration: 20 }),
+      withTiming(0.08, { duration: 18 }),
+      withTiming(0, { duration: 72, easing: easeOut })
+    ));
+
+    // Phase 4 — the angular eye outline draws around the Z.
+    frameReveal.value = withDelay(760, withTiming(1, { duration: 390, easing: easeOut }));
+
+    // Phase 5 — the bright center pulse and halo breathe once the logo lands.
+    coreReveal.value = withDelay(1030, withTiming(1, { duration: 170, easing: easeOut }));
+    corePulse.value = withDelay(1120, withRepeat(
+      withSequence(
+        withTiming(1, { duration: 520, easing: ReanimatedEasing.inOut(ReanimatedEasing.sin) }),
+        withTiming(0, { duration: 520, easing: ReanimatedEasing.inOut(ReanimatedEasing.sin) })
+      ),
+      2,
+      false
+    ));
+
+    // Phase 6 — a clean scanline sweeps across the eye.
+    scanReveal.value = withDelay(1420, withSequence(
+      withTiming(1, { duration: 220, easing: easeOut }),
+      withTiming(0, { duration: 80, easing: easeIn })
+    ));
+
+    // Phase 7 — impact flash, then staggered text reveal.
+    flashReveal.value = withDelay(1600, withSequence(
+      withTiming(1, { duration: 24, easing: easeOut }),
+      withTiming(0.32, { duration: 60, easing: easeIn }),
+      withTiming(1, { duration: 28, easing: easeOut }),
+      withTiming(0, { duration: 172, easing: easeIn })
+    ));
+    textOne.value = withDelay(1730, withTiming(1, { duration: 240, easing: easeOut }));
+    textTwo.value = withDelay(1850, withTiming(1, { duration: 220, easing: easeOut }));
+    textThree.value = withDelay(1955, withTiming(1, { duration: 220, easing: easeOut }));
+
+    // Phase 8 — hold the hero frame briefly, then fade/zoom into the app.
+    const finishSplash = () => onDone?.();
+    rootOpacity.value = withDelay(2960, withTiming(0, { duration: 440, easing: easeIn }, (finished) => {
+      if (finished) runOnJS(finishSplash)();
+    }));
+    rootScale.value = withDelay(2960, withTiming(1.12, { duration: 440, easing: easeOut }));
+
+    return () => {
+      cancelAnimation(slash);
+      cancelAnimation(streakA);
+      cancelAnimation(streakB);
+      cancelAnimation(streakC);
+      cancelAnimation(cameraDrift);
+      cancelAnimation(orbitSpin);
+      cancelAnimation(orbitPulse);
+      cancelAnimation(glitchBurst);
+      cancelAnimation(zReveal);
+      cancelAnimation(zJitter);
+      cancelAnimation(frameReveal);
+      cancelAnimation(coreReveal);
+      cancelAnimation(corePulse);
+      cancelAnimation(scanReveal);
+      cancelAnimation(flashReveal);
+      cancelAnimation(textOne);
+      cancelAnimation(textTwo);
+      cancelAnimation(textThree);
+      cancelAnimation(rootOpacity);
+      cancelAnimation(rootScale);
+    };
+  }, [onDone]);
+
+  const stageSparks = [
+    { left: 32, top: 56, size: 5 },
+    { left: 136, top: 46, size: 4 },
+    { left: 148, top: 96, size: 5 },
+    { left: 40, top: 132, size: 4 },
+  ];
+
+  return (
+    <AnimatedReanimated.View style={[sp.root, rootStyle]}>
+      <LinearGradient
+        colors={[SP_BG, '#121126', '#2a2660', SP_BG]}
+        locations={[0, 0.4, 0.72, 1]}
+        style={StyleSheet.absoluteFill}
+      />
+      <LinearGradient
+        colors={['rgba(120,109,255,0.0)', 'rgba(120,109,255,0.22)', 'rgba(201,194,255,0.0)']}
+        locations={[0, 0.5, 1]}
+        style={sp.backGlow}
+      />
+
+      {/* Phase 1 — indigo slash */}
+      <AnimatedReanimated.View style={[sp.slash, slashStyle]} pointerEvents="none">
+        <LinearGradient
+          colors={['rgba(120,109,255,0)', 'rgba(201,194,255,0.98)', 'rgba(120,109,255,0.95)', 'rgba(120,109,255,0)']}
+          locations={[0, 0.42, 0.56, 1]}
+          style={StyleSheet.absoluteFill}
+        />
+      </AnimatedReanimated.View>
+
+      {/* Phase 1.5 — native Skia reactor rig */}
+      <View style={sp.skiaWrap} pointerEvents="none">
+        <SkiaBackdrop />
+      </View>
+
+      {/* Phase 2 — three scan streaks */}
+      <AnimatedReanimated.View style={[sp.streak, streak1Style]} pointerEvents="none">
+        <LinearGradient colors={['rgba(120,109,255,0)', 'rgba(120,109,255,0.95)', 'rgba(201,194,255,0)']} locations={[0, 0.5, 1]} style={StyleSheet.absoluteFill} />
+      </AnimatedReanimated.View>
+      <AnimatedReanimated.View style={[sp.streak, streak2Style]} pointerEvents="none">
+        <LinearGradient colors={['rgba(98,76,255,0)', 'rgba(98,76,255,0.9)', 'rgba(120,109,255,0)']} locations={[0, 0.5, 1]} style={StyleSheet.absoluteFill} />
+      </AnimatedReanimated.View>
+      <AnimatedReanimated.View style={[sp.streak, streak3Style]} pointerEvents="none">
+        <LinearGradient colors={['rgba(201,194,255,0)', 'rgba(245,243,255,0.86)', 'rgba(120,109,255,0)']} locations={[0, 0.5, 1]} style={StyleSheet.absoluteFill} />
+      </AnimatedReanimated.View>
+
+      {/* Phase 7 — impact flash */}
+      <AnimatedReanimated.View style={[sp.flash, flashStyle]} pointerEvents="none" />
+
+      {/* Phase 6.5 — glitch burst bars */}
+      <AnimatedReanimated.View style={[sp.burstBar, burstStyle]} pointerEvents="none" />
+      <AnimatedReanimated.View style={[sp.burstBand, sp.burstBandA, burstTop1]} pointerEvents="none" />
+      <AnimatedReanimated.View style={[sp.burstBand, sp.burstBandB, burstTop2]} pointerEvents="none" />
+      <AnimatedReanimated.View style={[sp.burstBand, sp.burstBandC, burstTop3]} pointerEvents="none" />
+
+      {/* Main hero lockup */}
+      <View style={sp.content}>
+        <AnimatedReanimated.View style={[sp.logoWrap, logoStyle]}>
+          <AnimatedReanimated.View style={[sp.glowOrb, glowStyle]} pointerEvents="none">
+            <LinearGradient
+              colors={['rgba(120,109,255,0.03)', 'rgba(201,194,255,0.18)', 'rgba(98,76,255,0.04)']}
+              locations={[0, 0.52, 1]}
+              style={StyleSheet.absoluteFill}
+            />
+          </AnimatedReanimated.View>
+
+            <AnimatedReanimated.View style={[sp.orbitRing, ringStyle]} pointerEvents="none">
+              <Svg width={LOGO_SIZE + 78} height={LOGO_SIZE + 78} viewBox={`0 0 ${LOGO_SIZE + 78} ${LOGO_SIZE + 78}`}>
+                <Circle
+                  cx={(LOGO_SIZE + 78) / 2}
+                  cy={(LOGO_SIZE + 78) / 2}
+                  r={LOGO_SIZE / 2 + 22}
+                  fill="none"
+                  stroke="rgba(201,194,255,0.20)"
+                  strokeWidth={2}
+                  strokeDasharray="16 8"
+                />
+                <Circle
+                  cx={(LOGO_SIZE + 78) / 2}
+                  cy={(LOGO_SIZE + 78) / 2}
+                  r={LOGO_SIZE / 2 + 10}
+                  fill="none"
+                  stroke="rgba(120,109,255,0.16)"
+                  strokeWidth={1.5}
+                  strokeDasharray="6 12"
+                />
+              </Svg>
+            </AnimatedReanimated.View>
+
+            <AnimatedReanimated.View style={[sp.orbitDot, ringDotStyle]} pointerEvents="none" />
+            <AnimatedReanimated.View style={[sp.orbitDotInner, ringDotInnerStyle]} pointerEvents="none" />
+
+          <Svg width={LOGO_SIZE} height={LOGO_SIZE} viewBox={`0 0 ${LOGO_SIZE} ${LOGO_SIZE}`}>
+            <Defs>
+              <SvgLinearGradient id="eyeGrad" x1="22" y1="34" x2="156" y2="148" gradientUnits="userSpaceOnUse">
+                <Stop offset="0%" stopColor="#5148ff" stopOpacity="0.62" />
+                <Stop offset="55%" stopColor={SP_EM} stopOpacity="0.98" />
+                <Stop offset="100%" stopColor={SP_NEON} stopOpacity="0.95" />
+              </SvgLinearGradient>
+              <SvgLinearGradient id="scanGrad" x1="22" y1="0" x2="154" y2="0" gradientUnits="userSpaceOnUse">
+                <Stop offset="0%" stopColor="rgba(201,194,255,0)" />
+                <Stop offset="48%" stopColor="rgba(201,194,255,0.96)" />
+                <Stop offset="100%" stopColor="rgba(120,109,255,0)" />
+              </SvgLinearGradient>
+            </Defs>
+
+            <AnimatedPath
+              d={EYE_PATH}
+              fill="rgba(10, 10, 24, 0.92)"
+              stroke="url(#eyeGrad)"
+              strokeWidth={2.4}
+              strokeLinejoin="miter"
+              strokeLinecap="square"
+              strokeDasharray={620}
+              animatedProps={frameAnimatedProps}
+            />
+            <AnimatedPath
+              d={INNER_EYE_PATH}
+              fill="none"
+              stroke={SP_NEON}
+              strokeOpacity={0.42}
+              strokeWidth={1.4}
+              strokeLinejoin="miter"
+              strokeLinecap="square"
+              strokeDasharray={420}
+              animatedProps={innerFrameAnimatedProps}
+            />
+
+            <G>
+              <Path
+                d={Z_PATH}
+                fill="none"
+                stroke={SP_CY}
+                strokeOpacity={0.24}
+                strokeWidth={15}
+                strokeLinejoin="miter"
+                strokeLinecap="square"
+                transform="translate(-5,1)"
+              />
+              <Path
+                d={Z_PATH}
+                fill="none"
+                stroke={SP_EM}
+                strokeOpacity={0.96}
+                strokeWidth={15}
+                strokeLinejoin="miter"
+                strokeLinecap="square"
+              />
+              <Path
+                d={Z_PATH}
+                fill="none"
+                stroke="#f3f2ff"
+                strokeOpacity={0.94}
+                strokeWidth={2.25}
+                strokeLinejoin="miter"
+                strokeLinecap="square"
+                transform="translate(2,-2)"
+              />
+            </G>
+
+            <Circle cx={88} cy={88} r={7} fill={SP_NEON} opacity={0.92} />
+            <Circle cx={88} cy={88} r={14} fill="rgba(201,194,255,0.18)" opacity={0.92} />
+            <Rect x={26} y={84} width={126} height={8} rx={4} fill="url(#scanGrad)" opacity={0.55} />
+          </Svg>
+
+          {stageSparks.map((spark, index) => (
+            <View
+              key={index}
+              style={[
+                sp.spark,
+                {
+                  left: spark.left,
+                  top: spark.top,
+                  width: spark.size,
+                  height: spark.size,
+                  borderRadius: spark.size / 2,
+                },
+              ]}
+            />
+          ))}
+
+          {/* Phase 6 — scanline sweep */}
+          <AnimatedReanimated.View style={[sp.scanBeam, scanStyle]} pointerEvents="none">
+            <LinearGradient
+              colors={['rgba(98,243,255,0)', 'rgba(98,243,255,0.96)', 'rgba(98,243,255,0)']}
+              locations={[0, 0.5, 1]}
+              style={StyleSheet.absoluteFill}
+            />
+          </AnimatedReanimated.View>
+
+          {/* Phase 5 — bright center pulse */}
+          <AnimatedReanimated.View style={[sp.core, { opacity: interpolate(coreReveal.value, [0, 0.18, 1], [0, 0.8, 1]), transform: [{ scale: interpolate(corePulse.value, [0, 1], [0.92, 1.18]) }] }]} pointerEvents="none" />
+        </AnimatedReanimated.View>
+
+        {/* Phase 8 — staggered text reveal */}
+        <AnimatedReanimated.Text style={[sp.zemoo, textOneStyle]} allowFontScaling={false}>ZEMOO</AnimatedReanimated.Text>
+        <AnimatedReanimated.Text style={[sp.aiEyes, textTwoStyle]} allowFontScaling={false}>AIEyes</AnimatedReanimated.Text>
+        <AnimatedReanimated.View style={[sp.arBlock, textThreeStyle]}>
+          <Text style={sp.arText} allowFontScaling={false}>عيون الذكاء</Text>
+          <View style={sp.divider} />
+        </AnimatedReanimated.View>
+      </View>
+    </AnimatedReanimated.View>
+  );
+}
+
 const sp = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
-  box:  { alignItems: 'flex-start' },
-  row:  { flexDirection: 'row', alignItems: 'flex-end' },
-  Z:    { fontSize: 64, fontWeight: '100', letterSpacing: 12, color: '#fff' },
-  emoo: { fontSize: 64, fontWeight: '100', letterSpacing: 12, color: '#fff' },
-  line: { height: 2, backgroundColor: GREEN, marginTop: 6 },
-  ar:   { marginTop: 20, fontSize: 20, color: '#888', letterSpacing: 5 },
-  by:   { marginTop: 6,  fontSize: 12, color: '#444', letterSpacing: 2 },
+  root: {
+    flex: 1,
+    backgroundColor: SP_BG,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  content: { alignItems: 'center', justifyContent: 'center' },
+
+  backGlow: {
+    position: 'absolute',
+    width: Math.max(SW * 1.08, 520),
+    height: Math.max(SH * 0.72, 360),
+    left: SW * -0.04,
+    top: SH * 0.08,
+    opacity: 0.86,
+    transform: [{ rotate: '-7deg' }],
+  },
+
+  slash: {
+    position: 'absolute',
+    width: SW * 1.45,
+    height: 4,
+    left: SW * -0.22,
+    top: SH * 0.47,
+    borderRadius: 999,
+    overflow: 'hidden',
+  },
+
+  streak: {
+    position: 'absolute',
+    left: SW * -0.26,
+    width: SW * 1.54,
+    height: 3,
+    borderRadius: 999,
+    overflow: 'hidden',
+  },
+
+  flash: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(245,243,255,0.88)',
+  },
+
+  skiaWrap: {
+    ...StyleSheet.absoluteFillObject,
+    left: -SW * 0.12,
+    right: -SW * 0.12,
+    top: -SH * 0.06,
+    bottom: -SH * 0.08,
+  },
+
+  lottie: {
+    width: '100%',
+    height: '100%',
+  },
+
+  burstBar: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(6, 6, 17, 0.32)',
+  },
+
+  burstBand: {
+    position: 'absolute',
+    left: SW * -0.3,
+    width: SW * 1.7,
+    height: 3,
+    borderRadius: 999,
+    overflow: 'hidden',
+  },
+
+  burstBandA: { backgroundColor: 'rgba(120,109,255,0.96)' },
+  burstBandB: { backgroundColor: 'rgba(98,76,255,0.90)' },
+  burstBandC: { backgroundColor: 'rgba(201,194,255,0.88)' },
+
+  logoWrap: {
+    width: LOGO_SIZE,
+    height: LOGO_SIZE,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  glowOrb: {
+    position: 'absolute',
+    width: LOGO_SIZE + 118,
+    height: LOGO_SIZE + 118,
+    left: -59,
+    top: -59,
+    borderRadius: (LOGO_SIZE + 118) / 2,
+    overflow: 'hidden',
+  },
+
+  orbitRing: {
+    position: 'absolute',
+    width: LOGO_SIZE + 78,
+    height: LOGO_SIZE + 78,
+    left: -(39),
+    top: -(39),
+  },
+
+  orbitDot: {
+    position: 'absolute',
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: SP_NEON,
+    shadowColor: SP_NEON,
+    shadowOpacity: 1,
+    shadowRadius: 12,
+    elevation: 6,
+    left: LOGO_SIZE / 2 + 35,
+    top: LOGO_SIZE / 2 - 4,
+  },
+
+  orbitDotInner: {
+    position: 'absolute',
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+    backgroundColor: SP_CY,
+    shadowColor: SP_CY,
+    shadowOpacity: 0.9,
+    shadowRadius: 8,
+    elevation: 4,
+    left: LOGO_SIZE / 2 + 12,
+    top: LOGO_SIZE / 2 - 2,
+  },
+
+  spark: {
+    position: 'absolute',
+    backgroundColor: SP_NEON,
+    shadowColor: SP_NEON,
+    shadowOpacity: 0.9,
+    shadowRadius: 10,
+    elevation: 4,
+  },
+
+  scanBeam: {
+    position: 'absolute',
+    width: 118,
+    height: 10,
+    left: 0,
+    top: LOGO_SIZE / 2 - 5,
+    borderRadius: 999,
+    overflow: 'hidden',
+  },
+
+  core: {
+    position: 'absolute',
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: SP_NEON,
+    shadowColor: SP_NEON,
+    shadowOpacity: 1,
+    shadowRadius: 18,
+    elevation: 5,
+  },
+
+  zemoo: {
+    marginTop: 30,
+    fontSize: 35,
+    fontWeight: '200',
+    color: '#f4f3ff',
+    letterSpacing: 12,
+    textAlign: 'center',
+    textShadowColor: 'rgba(120,109,255,0.22)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 18,
+  },
+  aiEyes: {
+    marginTop: 6,
+    fontSize: 15,
+    fontWeight: '500',
+    color: '#c9c2ff',
+    letterSpacing: 6,
+    textAlign: 'center',
+    textShadowColor: 'rgba(120,109,255,0.18)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 12,
+  },
+  arBlock: { alignItems: 'center', marginTop: 3 },
+  arText: {
+    fontSize: 14,
+    color: 'rgba(201,194,255,0.92)',
+    letterSpacing: 3,
+    textAlign: 'center',
+    marginTop: 6,
+    marginBottom: 7,
+  },
+  divider: {
+    width: 42,
+    height: 1.5,
+    backgroundColor: '#786dff',
+    opacity: 0.72,
+  },
 });
 
 // ─────────────────────────── App ─────────────────────────────────────────────
@@ -1285,16 +2186,26 @@ export default function App() {
         </View>
       )}
 
-      {/* scan line */}
+      {/* scan beam */}
       {scanning && (
         <Animated.View pointerEvents="none"
-          style={[s.scanLine, { transform: [{ translateY: scanY }] }]} />
+          style={[s.scanBeamWrap, { transform: [{ translateY: scanY }] }]}>
+          <View style={s.scanBeamCore} />
+          <View style={s.scanBeamGlow} />
+        </Animated.View>
       )}
 
       {/* ── top bar ── */}
       <View style={s.topBar}>
-        <View style={{ width: 72 }} />
-        <Text style={s.topTitle}>عيون الذكاء</Text>
+        <View style={s.topLogoWrap}>
+          <View style={s.topEye}>
+            <View style={s.topEyePupil} />
+          </View>
+          <View style={s.topBrandCopy}>
+            <Text style={s.topTitle}>عيون الذكاء</Text>
+            <Text style={s.topSubTitle}>السلامة العائلية</Text>
+          </View>
+        </View>
         <View style={s.liveWrap}>
           <Animated.View style={[s.liveDot, { transform: [{ scale: pulse }] }]} />
           <Text style={s.liveTxt}>مباشر</Text>
@@ -1348,6 +2259,7 @@ export default function App() {
 
       {/* ── bottom sheet ── */}
       <View style={s.sheet}>
+        <View style={s.sheetHandle} />
         <Text style={s.hint}>{mode.hint}</Text>
 
         {/* mode pills */}
@@ -1371,9 +2283,11 @@ export default function App() {
           </TouchableOpacity>
 
           {/* mic */}
-          <TouchableOpacity style={[s.micBtn, listening && s.micRec]} onPress={handleMic}>
+          <TouchableOpacity style={[s.micBtn, listening && s.micRec, isProcessing && !listening && s.micProc]} onPress={handleMic}>
             {listening
               ? <View style={s.stopSquare} />
+              : isProcessing
+              ? <ActivityIndicator size="small" color={C.primary} />
               : <Text style={s.micTxt}>◉</Text>}
           </TouchableOpacity>
 
@@ -1427,210 +2341,200 @@ export default function App() {
 
 // ─── styles ───────────────────────────────────────────────────────────────────
 const s = StyleSheet.create({
-  root:   { flex: 1, backgroundColor: '#000' },
-  center: { flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
-  permTxt:    { color: '#fff', fontSize: 20, textAlign: 'center', marginBottom: 24, paddingHorizontal: 32 },
-  permBtn:    { backgroundColor: GREEN, paddingHorizontal: 36, paddingVertical: 14, borderRadius: 14 },
-  permBtnTxt: { color: '#000', fontSize: 18, fontWeight: '700' },
+  root:   { flex: 1, backgroundColor: C.bg },
+  center: { flex: 1, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center' },
+  permTxt:    { color: C.textPri, fontSize: 20, textAlign: 'center', marginBottom: 24, paddingHorizontal: 32 },
+  permBtn:    { backgroundColor: C.primary, paddingHorizontal: 36, paddingVertical: 14, borderRadius: 14 },
+  permBtnTxt: { color: C.bg, fontSize: 18, fontWeight: '700' },
 
-  // scan line
-  scanLine: {
-    position: 'absolute', left: 0, right: 0, height: 2,
-    backgroundColor: GREEN, opacity: 0.65,
+  // scan beam (replaces flat scan line)
+  scanBeamWrap: { position: 'absolute', left: 0, right: 0, height: 18 },
+  scanBeamCore: { height: 1.5, backgroundColor: C.primary, opacity: 0.88 },
+  scanBeamGlow: {
+    position: 'absolute', left: 0, right: 0, top: -8,
+    height: 18, backgroundColor: C.primary, opacity: 0.07, borderRadius: 9,
   },
 
-  cornerWrap: {
-    position: 'absolute',
-    borderWidth: 0,
-  },
-  corner: {
-    position: 'absolute',
-    width: 24,
-    height: 24,
-  },
-  cornerTL: {
-    left: -1,
-    top: -1,
-    borderLeftWidth: 3,
-    borderTopWidth: 3,
-    borderTopLeftRadius: 16,
-  },
-  cornerTR: {
-    right: -1,
-    top: -1,
-    borderRightWidth: 3,
-    borderTopWidth: 3,
-    borderTopRightRadius: 16,
-  },
-  cornerBL: {
-    left: -1,
-    bottom: -1,
-    borderLeftWidth: 3,
-    borderBottomWidth: 3,
-    borderBottomLeftRadius: 16,
-  },
-  cornerBR: {
-    right: -1,
-    bottom: -1,
-    borderRightWidth: 3,
-    borderBottomWidth: 3,
-    borderBottomRightRadius: 16,
-  },
+  // detection brackets
+  cornerWrap: { position: 'absolute', borderWidth: 0 },
+  corner:     { position: 'absolute', width: 20, height: 20 },
+  cornerTL: { left: -1, top: -1, borderLeftWidth: 2, borderTopWidth: 2, borderTopLeftRadius: 6 },
+  cornerTR: { right: -1, top: -1, borderRightWidth: 2, borderTopWidth: 2, borderTopRightRadius: 6 },
+  cornerBL: { left: -1, bottom: -1, borderLeftWidth: 2, borderBottomWidth: 2, borderBottomLeftRadius: 6 },
+  cornerBR: { right: -1, bottom: -1, borderRightWidth: 2, borderBottomWidth: 2, borderBottomRightRadius: 6 },
+
   detLabelWrap: {
     position: 'absolute',
-    backgroundColor: 'rgba(0,0,0,0.65)',
-    paddingHorizontal: 7,
-    paddingVertical: 3,
+    backgroundColor: 'rgba(16, 15, 38, 0.86)',
+    borderWidth: 1, borderColor: 'rgba(120, 109, 255, 0.22)',
+    paddingHorizontal: 8, paddingVertical: 3,
     borderRadius: 6,
   },
-  detLabelTxt: {
-    fontSize: 12,
-    fontWeight: '700',
-  },
+  detLabelTxt: { fontSize: 11, fontWeight: '700', letterSpacing: 0.4 },
+
   // top bar
   topBar: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingTop: Platform.OS === 'android' ? 38 : 56,
-    paddingBottom: 12, paddingHorizontal: 16,
-    backgroundColor: 'rgba(0,0,0,0.80)',
+    marginTop: Platform.OS === 'android' ? 10 : 14,
+    marginHorizontal: 10,
+    paddingTop: Platform.OS === 'android' ? 14 : 18,
+    paddingBottom: 12, paddingHorizontal: 14,
+    backgroundColor: 'rgba(18, 16, 41, 0.82)',
+    borderWidth: 1, borderColor: 'rgba(120, 109, 255, 0.18)',
+    borderRadius: 22,
+    shadowColor: C.primary, shadowOpacity: 0.10, shadowRadius: 14, elevation: 4,
   },
-  topTitle: { color: '#fff', fontSize: 17, fontWeight: '700', letterSpacing: 0.8 },
-  liveWrap: { width: 72, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end' },
-  liveDot:  { width: 8, height: 8, borderRadius: 4, backgroundColor: GREEN, marginRight: 5 },
-  liveTxt:  { color: GREEN, fontSize: 13, fontWeight: '600' },
+  topLogoWrap: { flex: 1, flexDirection: 'row', alignItems: 'center' },
+  topEye: {
+    width: 26, height: 26, borderRadius: 13,
+    borderWidth: 1.5, borderColor: C.primary,
+    alignItems: 'center', justifyContent: 'center',
+    shadowColor: C.primary, shadowOpacity: 0.55, shadowRadius: 6, elevation: 4,
+  },
+  topEyePupil: { width: 8, height: 8, borderRadius: 4, backgroundColor: C.primary },
+  topBrandCopy: { marginLeft: 10, flexShrink: 1 },
+  topTitle: { color: C.textPri, fontSize: 15, fontWeight: '700', letterSpacing: 1.2 },
+  topSubTitle: { color: C.textMuted, fontSize: 10, fontWeight: '600', letterSpacing: 2.1, marginTop: 2 },
+  liveWrap: {
+    minWidth: 82,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end',
+    paddingHorizontal: 12, paddingVertical: 7,
+    borderRadius: 999,
+    backgroundColor: 'rgba(120, 109, 255, 0.10)',
+    borderWidth: 1, borderColor: 'rgba(120, 109, 255, 0.16)',
+  },
+  liveDot:  {
+    width: 7, height: 7, borderRadius: 3.5, backgroundColor: C.primary, marginRight: 5,
+    shadowColor: C.primary, shadowOpacity: 0.8, shadowRadius: 5, elevation: 3,
+  },
+  liveTxt:  { color: C.primary, fontSize: 11, fontWeight: '600', letterSpacing: 1.5 },
 
   // overlays
   findBadge: {
     position: 'absolute',
     top: Platform.OS === 'android' ? 102 : 120,
     alignSelf: 'center',
-    backgroundColor: 'rgba(34,197,94,0.15)',
-    borderWidth: 1, borderColor: GREEN,
+    backgroundColor: C.primaryDim,
+    borderWidth: 1, borderColor: `${C.primary}66`,
     borderRadius: 20, paddingHorizontal: 16, paddingVertical: 6,
   },
-  findBadgeTxt: { color: GREEN, fontSize: 15, fontWeight: '600' },
+  findBadgeTxt: { color: C.primary, fontSize: 14, fontWeight: '600' },
 
   findQuickWrap: {
     position: 'absolute',
     top: Platform.OS === 'android' ? 138 : 154,
-    left: 8,
-    right: 8,
+    left: 8, right: 8,
   },
-  findQuickRow: {
-    paddingHorizontal: 4,
-    gap: 8,
-  },
+  findQuickRow:  { paddingHorizontal: 4, gap: 8 },
   findQuickChip: {
-    backgroundColor: 'rgba(0,0,0,0.72)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
-    borderRadius: 999,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
+    backgroundColor: 'rgba(18, 16, 41, 0.80)',
+    borderWidth: 1, borderColor: `${C.primary}28`,
+    borderRadius: 999, paddingHorizontal: 14, paddingVertical: 8,
   },
-  findQuickTxt: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
-  },
+  findQuickTxt:  { color: C.textSec, fontSize: 14, fontWeight: '600' },
 
-  descHint: {
-    position: 'absolute',
-    top: '42%', left: 0, right: 0, alignItems: 'center',
-  },
+  descHint: { position: 'absolute', top: '42%', left: 0, right: 0, alignItems: 'center' },
   descHintTxt: {
-    color: 'rgba(255,255,255,0.45)', fontSize: 16,
-    backgroundColor: 'rgba(0,0,0,0.4)', paddingHorizontal: 18, paddingVertical: 8,
-    borderRadius: 20,
+    color: C.textSec, fontSize: 15,
+    backgroundColor: 'rgba(18, 16, 41, 0.58)',
+    paddingHorizontal: 18, paddingVertical: 9, borderRadius: 20, letterSpacing: 0.5,
   },
 
   // banner
   banner: {
     position: 'absolute', bottom: 174, left: 12, right: 12,
-    backgroundColor: 'rgba(0,0,0,0.84)',
+    backgroundColor: 'rgba(16, 15, 38, 0.90)',
     borderRadius: 16, paddingVertical: 14, paddingHorizontal: 18,
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)',
+    borderWidth: 1, borderColor: C.border,
+    shadowColor: C.primary, shadowOpacity: 0.12, shadowRadius: 10, elevation: 4,
   },
-  bannerTxt: { color: '#fff', fontSize: 17, textAlign: 'center', lineHeight: 27 },
+  bannerTxt: { color: C.textPri, fontSize: 17, textAlign: 'center', lineHeight: 28 },
 
   statusBox: {
-    position: 'absolute',
-    bottom: 244,
-    left: 12,
-    right: 12,
-    backgroundColor: 'rgba(255,140,0,0.20)',
-    borderColor: 'rgba(255,140,0,0.55)',
-    borderWidth: 1,
-    borderRadius: 12,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
+    position: 'absolute', bottom: 244, left: 12, right: 12,
+    backgroundColor: C.warnDim,
+    borderColor: `${C.warn}88`, borderWidth: 1,
+    borderRadius: 12, paddingVertical: 8, paddingHorizontal: 12,
   },
-  statusTxt: { color: '#ffd29a', fontSize: 14, textAlign: 'center' },
+  statusTxt: { color: C.warn, fontSize: 14, textAlign: 'center' },
 
   // sheet
   sheet: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
-    backgroundColor: 'rgba(0,0,0,0.88)',
+    backgroundColor: C.glass,
     paddingTop: 8,
-    paddingBottom: Platform.OS === 'android' ? 14 : 28,
-    borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.06)',
+    paddingBottom: Platform.OS === 'android' ? 16 : 30,
+    borderTopWidth: 1, borderTopColor: C.border,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    overflow: 'hidden',
+  },
+  sheetHandle: {
+    alignSelf: 'center',
+    width: 46,
+    height: 4,
+    borderRadius: 999,
+    backgroundColor: 'rgba(201, 194, 255, 0.20)',
+    marginBottom: 8,
   },
   hint: {
-    color: 'rgba(255,255,255,0.3)', fontSize: 11,
-    textAlign: 'center', marginBottom: 7, letterSpacing: 0.4,
+    color: C.textMuted, fontSize: 11,
+    textAlign: 'center', marginBottom: 8, letterSpacing: 0.7,
   },
 
   // pills
-  pillRow:    { },
-  pillContent:{ paddingHorizontal: 12, gap: 8, paddingBottom: 2 },
-  pill:        { paddingHorizontal: 20, paddingVertical: 9, borderRadius: 22,
-                 backgroundColor: 'rgba(255,255,255,0.07)',
-                 borderWidth: 1, borderColor: 'rgba(255,255,255,0.05)' },
-  pillOn:      { backgroundColor: GREEN, borderColor: GREEN },
-  pillTxt:     { color: 'rgba(255,255,255,0.5)', fontSize: 15, fontWeight: '500' },
-  pillTxtOn:   { color: '#000', fontWeight: '700' },
+  pillRow:     {},
+  pillContent: { paddingHorizontal: 14, gap: 8, paddingBottom: 2 },
+  pill: {
+    paddingHorizontal: 18, paddingVertical: 9, borderRadius: 22,
+    backgroundColor: 'rgba(120, 109, 255, 0.08)',
+    borderWidth: 1, borderColor: 'rgba(120, 109, 255, 0.16)',
+  },
+  pillOn: {
+    backgroundColor: C.primary, borderColor: C.primary,
+    shadowColor: C.primary, shadowOpacity: 0.45, shadowRadius: 8, elevation: 4,
+  },
+  pillTxt:   { color: C.textSec, fontSize: 14, fontWeight: '500' },
+  pillTxtOn: { color: C.bg, fontWeight: '700' },
 
   // controls
   ctrl: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 40, paddingTop: 10,
+    paddingHorizontal: 40, paddingTop: 12,
   },
   iconBtn: {
-    width: 46, height: 46, borderRadius: 23,
-    backgroundColor: 'rgba(255,255,255,0.09)',
+    width: 48, height: 48, borderRadius: 24,
+    backgroundColor: 'rgba(120, 109, 255, 0.10)',
     alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.09)',
+    borderWidth: 1, borderColor: 'rgba(120, 109, 255, 0.18)',
   },
-  iconTxt: { color: '#fff', fontSize: 22 },
+  iconTxt: { color: C.textSec, fontSize: 20 },
+
   micBtn: {
-    width: 62, height: 62, borderRadius: 31,
-    backgroundColor: GREEN,
+    width: 66, height: 66, borderRadius: 33,
+    backgroundColor: C.primary,
     alignItems: 'center', justifyContent: 'center',
-    elevation: 8,
-    shadowColor: GREEN, shadowOpacity: 0.55,
-    shadowOffset: { width: 0, height: 2 }, shadowRadius: 10,
+    elevation: 10,
+    shadowColor: C.primary, shadowOpacity: 0.6,
+    shadowOffset: { width: 0, height: 2 }, shadowRadius: 14,
   },
-  micRec:     { backgroundColor: RED, shadowColor: RED },
-  micTxt:     { color: '#fff', fontSize: 26 },
+  micRec:  { backgroundColor: C.danger, shadowColor: C.danger },
+  micProc: { backgroundColor: C.surface, shadowColor: C.primary, shadowOpacity: 0.25 },
+  micTxt:  { color: C.bg, fontSize: 26 },
   stopSquare: { width: 18, height: 18, borderRadius: 3, backgroundColor: '#fff' },
+
   sosBtn: {
-    width: 46, height: 46, borderRadius: 23,
-    backgroundColor: RED, alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)',
+    width: 48, height: 48, borderRadius: 24,
+    backgroundColor: 'rgba(255, 48, 98, 0.12)',
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1.5, borderColor: `${C.danger}55`,
   },
-  sosWrap: {
-    width: 62,
-    height: 62,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  sosWrap: { width: 64, height: 64, alignItems: 'center', justifyContent: 'center' },
   sosRing: {
     position: 'absolute',
-    width: 62,
-    height: 62,
-    borderRadius: 31,
-    borderWidth: 2,
-    borderColor: '#fff',
+    width: 64, height: 64, borderRadius: 32,
+    borderWidth: 2, borderColor: C.danger,
+    shadowColor: C.danger, shadowOpacity: 0.7, shadowRadius: 8,
   },
-  sosTxt: { color: '#fff', fontSize: 11, fontWeight: '800', letterSpacing: 1.5 },
+  sosTxt: { color: C.danger, fontSize: 10, fontWeight: '800', letterSpacing: 1.5 },
 });

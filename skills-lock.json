@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "video-analyzer": {
+      "source": "AbsolutelySkilled/AbsolutelySkilled",
+      "sourceType": "github",
+      "skillPath": "skills/video-analyzer/SKILL.md",
+      "computedHash": "a7da9846f150d7bc90cadd98ad5ae24df81199d24d41ee3df36c0f4a1b945298"
+    }
+  }
+}
