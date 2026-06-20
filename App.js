@@ -23,6 +23,7 @@ import * as Location from 'expo-location';
 import { Accelerometer } from 'expo-sensors';
 import { Audio } from 'expo-av';
 import { StatusBar } from 'expo-status-bar';
+import { handleTranscript as whisperHandler } from './utils/whisper_handler';
 import Svg, { Defs, G, Path, Circle, Rect, Stop, LinearGradient as SvgLinearGradient } from 'react-native-svg';
 import AnimatedReanimated, {
   Easing as ReanimatedEasing,
@@ -38,13 +39,21 @@ import AnimatedReanimated, {
   withTiming,
 } from 'react-native-reanimated';
 import { supabase } from './utils/supabase';
+import { ensureUserProfile } from './utils/profile';
 import { detectObjects } from './utils/api';
 import {
   geminiReadText,
   geminiDescribeScene,
   geminiDetectCurrency,
+  geminiChat,
   getGeminiBlockedUntil,
 } from './utils/gemini';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import AuthScreen from './screens/AuthScreen';
+import IntroScreen from './screens/IntroScreen';
+import AssistantScreen from './screens/AssistantScreen';
+import FamilyModal from './components/FamilyModal';
+import AssistantTransition from './components/AssistantTransition';
 
 // ─── screen ──────────────────────────────────────────────────────────────────
 const { width: SW, height: SH } = Dimensions.get('window');
@@ -56,6 +65,7 @@ const TG_CHAT  = process.env.EXPO_PUBLIC_TELEGRAM_CHAT_ID ?? '8698073497';
 
 // ─── modes ────────────────────────────────────────────────────────────────────
 const MODES = [
+  { id: 'assistant', ar: 'مساعد', hint: 'المساعد الصوتي الذكي' },
   { id: 'read',     ar: 'قراءة',   hint: 'قراءة النصوص' },
   { id: 'describe', ar: 'وصف',     hint: 'اضغط ◉ لوصف المشهد' },
   { id: 'explore',  ar: 'استكشاف', hint: 'كشف تلقائي للأشياء' },   // index 2 — center
@@ -68,6 +78,32 @@ const SOS_WORDS = [
   'خطر', 'الله', 'يا ناس',
   'help', 'help me', 'urgence', 'urgent', 'sos',
 ];
+
+// ─── weather helpers (Open-Meteo — free, no auth) ────────────────────────────
+function wmoCodeToAr(code) {
+  if (code === 0)  return 'سماء صافية';
+  if (code <= 3)   return 'غيوم جزئية';
+  if (code <= 48)  return 'ضباب';
+  if (code <= 55)  return 'رذاذ خفيف';
+  if (code <= 67)  return 'مطر';
+  if (code <= 77)  return 'ثلج';
+  if (code <= 82)  return 'زخات مطر';
+  if (code <= 99)  return 'عاصفة رعدية';
+  return 'طقس متغير';
+}
+async function fetchWeatherContext(lat, lon) {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    const res = await fetch(
+      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true&timezone=auto`,
+      { signal: ctrl.signal },
+    ).finally(() => clearTimeout(timer));
+    if (!res.ok) return null;
+    const { current_weather: w } = await res.json();
+    return `الطقس الحالي: ${Math.round(w.temperature)}°م، ${wmoCodeToAr(w.weathercode)}، رياح ${Math.round(w.windspeed)} كم/س`;
+  } catch { return null; }
+}
 const C = {
   bg:          '#090814',
   surface:     '#151331',
@@ -89,6 +125,7 @@ const C = {
 const GREEN  = C.found;
 const ORANGE = C.warn;
 const RED    = C.danger;
+const VIOLET = '#b29bff'; // soft violet accent — important but not dangerous
 
 const AnimatedPath = AnimatedReanimated.createAnimatedComponent(Path);
 
@@ -214,19 +251,104 @@ function detectionPosition(box, frameWidth) {
   return 'أمامك';
 }
 
-function detectionSummary(detections, frameWidth) {
-  const seen = new Set();
-  let lastLabel = null;
-  const top = [];
-  for (const det of [...detections].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))) {
-    if (det.label === lastLabel) continue;
-    lastLabel = det.label;
-    if (seen.has(det.label)) continue;
-    seen.add(det.label);
-    top.push(`${translateLabel(det.label)} ${detectionPosition(det.box, frameWidth)}`);
-    if (top.length >= 2) break;
+// ─── Explore / Discover mode helpers ─────────────────────────────────────────
+
+const EXPLORE_PRIORITY = {
+  person:         80,
+  car:            78,
+  bus:            78,
+  truck:          75,
+  motorcycle:     75,
+  bicycle:        70,
+  chair:          70,
+  'dining table': 70,
+  couch:          68,
+  bed:            68,
+  backpack:       50,
+  handbag:        48,
+  'cell phone':   40,
+  laptop:         40,
+  book:           35,
+  bottle:         28,
+  cup:            25,
+  umbrella:       20,
+  tv:             15,
+  refrigerator:   15,
+  clock:          10,
+  knife:          10,
+  fork:           5,
+  spoon:          5,
+};
+
+function buildExploreAnnouncement(detections, frame) {
+  const frameArea = frame.width * frame.height;
+
+  const useful = detections.filter((d) => (d.confidence ?? 0) >= 0.35);
+  if (useful.length === 0) return { text: '', urgent: false, urgentType: null, signature: '' };
+
+  const scored = useful.map((d) => {
+    const areaRatio   = frameArea > 0 ? boxArea(d.box) / frameArea : 0;
+    const heightRatio = frame.height > 0 ? (d.box.y2 - d.box.y1) / frame.height : 0;
+    const isClose     = areaRatio > 0.15 || heightRatio > 0.35;
+    const cx          = (d.box.x1 + d.box.x2) / 2;
+    const centerDist  = frame.width > 0 ? Math.abs(cx / frame.width - 0.5) : 0.5;
+    const centerBonus = (1 - centerDist * 2) * 15;
+    const priorityScore = EXPLORE_PRIORITY[d.label] ?? 20;
+    const sizeBonus   = Math.min(areaRatio * 50, 25);
+    const closeBonus  = isClose ? 50 : 0;
+    const score = (d.confidence ?? 0) * 100 + centerBonus + priorityScore + sizeBonus + closeBonus;
+    return { ...d, isClose, areaRatio, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+
+  // Immediate safety: close person overrides everything
+  const closePerson = scored.find((d) => d.label === 'person' && d.isClose);
+  if (closePerson) {
+    const pos = detectionPosition(closePerson.box, frame.width);
+    const dir = pos === 'أمامك' ? 'أمامك' : `على ${pos}`;
+    return {
+      text: `انتبه، شخص قريب ${dir}`,
+      urgent: true,
+      urgentType: 'closeperson',
+      signature: `closeperson-${pos}`,
+    };
   }
-  return top.join('، ');
+
+  // Immediate safety: any close obstacle
+  const closeObstacle = scored.find((d) => d.isClose && d.label !== 'person');
+  if (closeObstacle) {
+    const pos   = detectionPosition(closeObstacle.box, frame.width);
+    const dir   = pos === 'أمامك' ? 'أمامك' : `على ${pos}`;
+    const label = translateLabel(closeObstacle.label);
+    return {
+      text: `انتبه، ${label} قريب ${dir}`,
+      urgent: true,
+      urgentType: 'closeobstacle',
+      signature: `closeobj-${closeObstacle.label}-${pos}`,
+    };
+  }
+
+  // Normal awareness: top 2 unique objects by score
+  const seen     = new Set();
+  const parts    = [];
+  const sigParts = [];
+  for (const d of scored) {
+    if (seen.has(d.label)) continue;
+    seen.add(d.label);
+    const pos   = detectionPosition(d.box, frame.width);
+    const label = translateLabel(d.label);
+    const dir   = pos === 'أمامك' ? 'أمامك' : `على ${pos}`;
+    parts.push(`${label} ${dir}`);
+    sigParts.push(`${d.label}-${pos}`);
+    if (parts.length >= 2) break;
+  }
+
+  if (parts.length === 0) return { text: '', urgent: false, urgentType: null, signature: '' };
+
+  const text      = parts.length === 2 ? `${parts[0]} و${parts[1]}` : parts[0];
+  const signature = sigParts.join('|');
+  return { text, urgent: false, urgentType: null, signature };
 }
 
 function clamp(value, min, max) {
@@ -458,11 +580,43 @@ async function groqWhisper(audioUri) {
   return result;
 }
 
+async function groqChat(question, systemContext = '') {
+  if (!GROQ_KEY) { console.log('[GroqChat] no key'); return null; }
+  try {
+    const messages = [];
+    if (systemContext) messages.push({ role: 'system', content: systemContext });
+    messages.push({ role: 'user', content: question });
+
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        messages,
+        max_tokens: 350,
+        temperature: 0.7,
+      }),
+    });
+    console.log('[GroqChat] status:', res.status);
+    if (!res.ok) {
+      const body = await res.text();
+      console.log('[GroqChat] error:', body.slice(0, 200));
+      return null;
+    }
+    const reply = ((await res.json()).choices?.[0]?.message?.content ?? '').trim();
+    console.log('[GroqChat] reply:', reply.slice(0, 120));
+    return reply || null;
+  } catch (e) {
+    console.log('[GroqChat] exception:', e?.message);
+    return null;
+  }
+}
+
 // ─────────────────────────── Splash ──────────────────────────────────────────
 const LOGO_SIZE = 180;
-const SP_EM   = '#7a6cff';
-const SP_NEON = '#c9c2ff';
-const SP_CY   = '#f5f3ff';
+const SP_EM   = '#786dff';
+const SP_NEON = '#b29bff';
+const SP_CY   = '#f4f3ff';
 const SP_BG   = '#060611';
 const Z_PATH = 'M 48 50 H 126 L 58 88 H 126 L 48 126';
 const EYE_PATH = 'M 24 88 L 46 56 L 84 40 L 130 47 L 152 88 L 130 129 L 84 136 L 46 120 Z';
@@ -716,6 +870,11 @@ function Splash({ onDone }) {
       { scale: interpolate(corePulse.value, [0, 1], [1.08, 0.98]) },
       { rotate: `${interpolate(cameraDrift.value, [0, 1], [-1.5, 1.5])}deg` },
     ],
+  }));
+
+  const coreStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(coreReveal.value, [0, 0.18, 1], [0, 0.8, 1]),
+    transform: [{ scale: interpolate(corePulse.value, [0, 1], [0.92, 1.18]) }],
   }));
 
   const burstStyle = useAnimatedStyle(() => ({
@@ -1149,7 +1308,7 @@ function Splash({ onDone }) {
           </AnimatedReanimated.View>
 
           {/* Phase 5 — bright center pulse */}
-          <AnimatedReanimated.View style={[sp.core, { opacity: interpolate(coreReveal.value, [0, 0.18, 1], [0, 0.8, 1]), transform: [{ scale: interpolate(corePulse.value, [0, 1], [0.92, 1.18]) }] }]} pointerEvents="none" />
+          <AnimatedReanimated.View style={[sp.core, coreStyle]} pointerEvents="none" />
         </AnimatedReanimated.View>
 
         {/* Phase 8 — staggered text reveal */}
@@ -1328,7 +1487,7 @@ const sp = StyleSheet.create({
     fontSize: 35,
     fontWeight: '200',
     color: '#f4f3ff',
-    letterSpacing: 12,
+    letterSpacing: 7,
     textAlign: 'center',
     textShadowColor: 'rgba(120,109,255,0.22)',
     textShadowOffset: { width: 0, height: 0 },
@@ -1339,7 +1498,7 @@ const sp = StyleSheet.create({
     fontSize: 15,
     fontWeight: '500',
     color: '#c9c2ff',
-    letterSpacing: 6,
+    letterSpacing: 3,
     textAlign: 'center',
     textShadowColor: 'rgba(120,109,255,0.18)',
     textShadowOffset: { width: 0, height: 0 },
@@ -1349,7 +1508,7 @@ const sp = StyleSheet.create({
   arText: {
     fontSize: 14,
     color: 'rgba(201,194,255,0.92)',
-    letterSpacing: 3,
+    letterSpacing: 1,
     textAlign: 'center',
     marginTop: 6,
     marginBottom: 7,
@@ -1365,8 +1524,10 @@ const sp = StyleSheet.create({
 // ─────────────────────────── App ─────────────────────────────────────────────
 export default function App() {
   const [splash,    setSplash]    = useState(true);
+  const [introDone, setIntroDone] = useState(null);
   const [camPerm,   reqCam]       = useCameraPermissions();
-  const [modeIdx,   setModeIdx]   = useState(2);
+  const [modeIdx,   setModeIdx]   = useState(3);
+  const [modeBarReady, setModeBarReady] = useState(false);
   const [facing,    setFacing]    = useState('back');
   const [listening, setListening] = useState(false);
   const [findTgt,   setFindTgt]   = useState(null);
@@ -1381,13 +1542,20 @@ export default function App() {
     detections: [],
     tone: GREEN,
   });
+  const [currentUser,     setCurrentUser]     = useState(null);
+  const [authReady,       setAuthReady]       = useState(false);
+  const [showFamilyModal, setShowFamilyModal] = useState(false);
+  const [assistantAnswer,  setAssistantAnswer]  = useState(null);
+  const [assistTransition, setAssistTransition] = useState(null); // null | 'in' | 'out'
+  const exploreModeIdx = MODES.findIndex((item) => item.id === 'explore');
 
   const camRef        = useRef(null);
   const modeScrollRef    = useRef(null);
-  const pillLayouts      = useRef([]);
-  const modeContentWidth = useRef(0);
-  const momentumExpected = useRef(false);
-  const initialCentered  = useRef(false);
+  const pillLayouts        = useRef([]);
+  const modeContentWidth   = useRef(0);
+  const momentumExpected   = useRef(false);
+  const programmaticScroll = useRef(false);
+  const initialCentered    = useRef(false);
   const busy          = useRef(false);
   const isSpeaking   = useRef(false);
   const speakTimer   = useRef(null);
@@ -1403,8 +1571,13 @@ export default function App() {
   const lastExplorePhrase = useRef('');
   const lastExploreSpokeAt = useRef(0);
   const lastClosePersonAt = useRef(0);
-  const handleMicRef = useRef(null);
-  const triggerRef   = useRef(null);
+  const lastCloseObstacleAt = useRef(0);
+  const lastExploreObjectsSignature = useRef('');
+  const handleMicRef       = useRef(null);
+  const triggerRef         = useRef(null);
+  const startListeningRef  = useRef(null);
+  const stopListeningRef   = useRef(null);
+  const processVoiceRef    = useRef(null);
   const lastReadTime      = useRef(0);
   const lastFrameAt       = useRef(0);
   const lastFindVisionAt  = useRef(0);
@@ -1421,8 +1594,21 @@ export default function App() {
   const bannerOp     = useRef(new Animated.Value(0)).current;
   const pulse        = useRef(new Animated.Value(1)).current;
   const scanAnim     = useRef(new Animated.Value(0)).current;
+  const currentUserRef = useRef(null);
 
   const mode = MODES[modeIdx];
+
+  function returnToCameraMode() {
+    setListening(false);
+    setAssistantAnswer(null);
+    setScanning(false);
+    scanAnim.stopAnimation();
+    scanAnim.setValue(0);
+    setAssistTransition('out');
+  }
+
+  // Keep currentUserRef in sync so async closures always see the latest user
+  useEffect(() => { currentUserRef.current = currentUser; }, [currentUser]);
 
   // ── spoke helper ──
   function safeTts(text) {
@@ -1476,12 +1662,22 @@ export default function App() {
   }
 
   async function startListening(autoStopMs = null) {
-    if (recRef.current) return;
-    stoppingRef.current = false; // reset in case a prior stop left it stuck
+    if (recRef.current || stoppingRef.current) {
+      console.log('[Mic] startListening: busy, ignoring');
+      return;
+    }
+    stoppingRef.current = false;
     try {
       Speech.stop();
-      // Brief pause so any in-flight TTS audio finishes before the mic opens
-      await new Promise(r => setTimeout(r, 150));
+      isSpeaking.current = false;
+      // Fully release any previous audio session before opening the mic
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: false,
+        shouldDuckAndroid: false,
+      });
+      await new Promise(r => setTimeout(r, 280));
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
@@ -1494,17 +1690,19 @@ export default function App() {
       setListening(true);
       console.log('[Mic] recording started');
       Vibration.vibrate(50);
-      if (autoStopMs != null) {
-        clearTimeout(voiceAutoStopTimer.current);
-        voiceAutoStopTimer.current = setTimeout(() => stopListeningAndProcess(), autoStopMs);
-      }
+      // Always use an auto-stop: explicit arg, or 20 s safety for manual taps
+      const stopAfter = autoStopMs ?? 20000;
+      clearTimeout(voiceAutoStopTimer.current);
+      voiceAutoStopTimer.current = setTimeout(() => stopListeningRef.current?.(), stopAfter);
     } catch (e) {
       console.log('[Mic] start error:', e?.message);
       recRef.current = null;
+      stoppingRef.current = false;
       setListening(false);
       announce('تعذّر تفعيل الميكروفون');
     }
   }
+  startListeningRef.current = startListening;
 
   async function stopListeningAndProcess() {
     // Prevent double-stop: auto-stop timer and manual press can race
@@ -1538,8 +1736,19 @@ export default function App() {
         .replace(/^\s*(?:اوعمتسا|يعمتسا|عمتسا|عمتسأ|استمعوا|استمعي|استمع|أستمع)\s*/u, '')
         .trim();
       console.log('[Mic] transcript raw:', raw, '→ clean:', text);
-      if (text) processVoice(text);
-      else announce('لم أفهم، حاول مرة أخرى');
+      // Give an optional external whisper handler the first chance to consume
+      // the transcript. If it returns `true` we treat it as handled and skip
+      // the built-in mode router (`processVoice`). Drop your handler file
+      // at `utils/whisper_handler.js` and export `handleTranscript` to hook in.
+      let handled = false;
+      try {
+        handled = await (whisperHandler?.(text) ?? false);
+      } catch (e) {
+        console.log('[WhisperHandler] error:', e?.message);
+        handled = false;
+      }
+      if (!text)         announce('لم أفهم، حاول مرة أخرى');
+      else if (!handled) processVoiceRef.current?.(text);
     } catch (e) {
       console.log('[Mic] stop error:', e?.message);
       announce('تعذّر التعرف على الصوت');
@@ -1548,6 +1757,7 @@ export default function App() {
       stoppingRef.current = false;
     }
   }
+  stopListeningRef.current = stopListeningAndProcess;
 
   function centerActiveMode(idx = modeIdx, animated = true) {
     const layout = pillLayouts.current[idx];
@@ -1555,10 +1765,12 @@ export default function App() {
     const targetX = layout.x + layout.width / 2 - SW / 2;
     const maxScrollX = Math.max(0, modeContentWidth.current - SW);
     const x = Math.min(Math.max(0, targetX), maxScrollX);
+    programmaticScroll.current = true;
     modeScrollRef.current.scrollTo({ x, animated });
   }
 
   function handleModeScrollEnd(e) {
+    if (programmaticScroll.current) { programmaticScroll.current = false; return; }
     const scrollX = e.nativeEvent.contentOffset.x;
     const center  = scrollX + SW / 2;
     let closest = 0, closestDist = Infinity;
@@ -1633,21 +1845,48 @@ export default function App() {
 
   // ── boot ──
   useEffect(() => {
-    (async () => {
-      await reqCam();
-      await Audio.requestPermissionsAsync();
-      try {
-        const { error } = await supabase.from('sessions').insert({ mode: MODES[0].ar });
-        console.log('[Supabase] sessions insert:', error ?? 'ok');
-      } catch (e) { console.log('[Supabase] sessions error:', e); }
-    })();
+    // Load intro done flag
+    AsyncStorage.getItem('aieyes_intro_done')
+      .then(v => setIntroDone(v === '1'))
+      .catch(() => setIntroDone(true));
+
+    // Permissions and auth run in parallel
+    reqCam();
+    Audio.requestPermissionsAsync();
+
+    // Auth: load current session, then subscribe to changes
+    supabase.auth.getSession()
+      .then(({ data: { session } }) => {
+        setCurrentUser(session?.user ?? null);
+        setAuthReady(true);
+      })
+      .catch(() => setAuthReady(true));
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setCurrentUser(session?.user ?? null);
+      setAuthReady(true);
+    });
+
     return () => {
+      subscription.unsubscribe();
       clearInterval(loop.current);
       clearInterval(sosLoop.current);
       clearTimeout(speakTimer.current);
       clearTimeout(voiceAutoStopTimer.current);
     };
   }, []);
+
+  // ── initial session insert + profile ensure once user is known ──
+  const initialSessionDone = useRef(false);
+  useEffect(() => {
+    if (currentUser && !initialSessionDone.current) {
+      initialSessionDone.current = true;
+      ensureUserProfile(currentUser);
+      supabase.from('sessions')
+        .insert({ mode: MODES[0].id, user_id: currentUser.id })
+        .then(({ error }) => console.log('[Supabase] initial session:', error ?? 'ok'));
+    }
+  }, [currentUser]);
 
   // ── live dot pulse ──
   useEffect(() => {
@@ -1704,7 +1943,7 @@ export default function App() {
           shakeCooldown = now + 3000; // 3 s cooldown prevents accidental re-trigger
           Vibration.vibrate(100);
           shakeVoiceModeRef.current = true;
-          startListening(3500);
+          startListeningRef.current?.(3500);
         }
       }
     });
@@ -1714,6 +1953,7 @@ export default function App() {
 
   // ── run the active mode's scan function ──
   function runCurrentMode(modeId) {
+    if (modeId === 'assistant') return;
     if (modeId === 'explore')  doExplore();
     if (modeId === 'currency') doCurrency();
     if (modeId === 'find')     doFind();
@@ -1731,6 +1971,8 @@ export default function App() {
     lastFrameAt.current = 0;
     lastFindVisionAt.current = 0;
     lastExploreFallbackAt.current = 0;
+    lastExploreObjectsSignature.current = '';
+    lastCloseObstacleAt.current = 0;
     setOverlayState((current) => ({ ...current, detections: [] }));
 
     const modeId = MODES[modeIdx]?.id;
@@ -1762,30 +2004,80 @@ export default function App() {
       if (epoch.current !== myEpoch) return;
 
       console.log('[Explore] YOLO detections:', detections.length);
-      setDetectionOverlay(frame, detections, GREEN);
 
-      const summary = detectionSummary(detections, frame.width);
+      // Per-detection color: red = close/danger, violet = important, primary = normal
+      const coloredDetections = detections.map((d) => {
+        const ar = (frame.width * frame.height) > 0
+          ? boxArea(d.box) / (frame.width * frame.height) : 0;
+        const isClose = ar > 0.15 || (d.box.y2 - d.box.y1) / (frame.height || 1) > 0.35;
+        const isImportant = (EXPLORE_PRIORITY[d.label] ?? 0) >= 60;
+        return {
+          ...d,
+          detColor: isClose ? RED : isImportant ? VIOLET : C.primary,
+        };
+      });
+      setDetectionOverlay(frame, coloredDetections, C.primary);
+
+      const { text, urgent, urgentType, signature } = buildExploreAnnouncement(detections, frame);
       const t = Date.now();
 
-      const closePerson = detections.find((det) => shouldWarnClosePerson(det, frame));
-      if (closePerson && t - lastClosePersonAt.current > 12000) {
-        lastClosePersonAt.current = t;
-        softAnnounce('شخص قريب منك، انتبه');
+      console.log('[Explore] announcement:', text || '(none)', 'urgent:', urgent, 'sig:', signature);
+
+      if (urgent) {
+        const cooldown = urgentType === 'closeperson' ? 3000 : 4000;
+        const lastAt   = urgentType === 'closeperson'
+          ? lastClosePersonAt.current
+          : lastCloseObstacleAt.current;
+
+        if (t - lastAt > cooldown) {
+          if (urgentType === 'closeperson') lastClosePersonAt.current = t;
+          else lastCloseObstacleAt.current = t;
+          Vibration.vibrate(120);
+          Speech.stop();
+          isSpeaking.current = false;
+          softAnnounce(text);
+          lastExplorePhrase.current = text;
+          lastExploreSpokeAt.current = t;
+          lastExploreObjectsSignature.current = signature;
+          console.log('[Explore] urgent warning:', text);
+        } else {
+          console.log('[Explore] skipped repeat urgent:', text);
+        }
         return;
       }
 
-      const enoughTime = summary !== lastExplorePhrase.current
-        ? t - lastExploreSpokeAt.current > 10000
-        : t - lastExploreSpokeAt.current > 12000;
-      if (summary && enoughTime) {
-        lastExplorePhrase.current = summary;
-        lastExploreSpokeAt.current = t;
-        softAnnounce(summary);
+      if (!text) {
+        if (t - lastExploreFallbackAt.current > 12000 && !isSpeaking.current) {
+          lastExploreFallbackAt.current = t;
+          softAnnounce('المسار أمامك يبدو فارغاً');
+          console.log('[Explore] clear path announcement');
+        }
+        return;
       }
-      if (!summary && t - lastExploreFallbackAt.current > 7000) {
-        lastExploreFallbackAt.current = t;
-        setStatus('لا يوجد كائن واضح حالياً');
+
+      const sameSignature  = signature === lastExploreObjectsSignature.current;
+      const samePhrase     = text === lastExplorePhrase.current;
+      const timeSinceSpoke = t - lastExploreSpokeAt.current;
+
+      if (sameSignature && timeSinceSpoke < 6000) {
+        console.log('[Explore] skipped repeat sig:', signature);
+        return;
       }
+      if (samePhrase && timeSinceSpoke < 6000) {
+        console.log('[Explore] skipped same phrase:', text);
+        return;
+      }
+      if (!sameSignature && timeSinceSpoke < 3000) {
+        console.log('[Explore] too soon for new phrase, waiting...');
+        return;
+      }
+
+      lastExplorePhrase.current = text;
+      lastExploreSpokeAt.current = t;
+      lastExploreObjectsSignature.current = signature;
+      softAnnounce(text);
+      console.log('[Explore] announced:', text);
+
     } catch (e) {
       console.log('[Explore] exception:', e?.message);
       const t = Date.now();
@@ -2025,8 +2317,9 @@ export default function App() {
 
     try {
       const { error } = await supabase.from('sos_alerts').insert({
-        latitude: lat,
+        latitude:  lat,
         longitude: lon,
+        user_id:   currentUserRef.current?.id ?? null,
       });
       console.log('[SOS] Supabase sos_alerts:', error ?? 'ok');
     } catch (e) { console.log('[SOS] Supabase error:', e?.message); }
@@ -2043,6 +2336,7 @@ export default function App() {
         const { error } = await supabase.from('location_updates').insert({
           latitude:  loc.coords.latitude,
           longitude: loc.coords.longitude,
+          user_id:   currentUserRef.current?.id ?? null,
         });
         console.log('[SOS] location_updates tick', ticks, ':', error ?? 'ok');
       } catch (e) { console.log('[SOS] location_updates error:', e?.message); }
@@ -2069,6 +2363,38 @@ export default function App() {
   }
   handleMicRef.current = handleMic;
 
+  async function handleAssistantQuery(text) {
+    const t = (text ?? '').trim();
+    if (!t) return null;
+
+    // Back-to-camera command via typed input
+    const low = t.toLowerCase();
+    const BACK_WORDS = ['camera', 'eyes', 'كاميرا', 'الكاميرا', 'back to camera', 'open camera', 'camera mode', 'ارجع', 'رجوع', 'العودة'];
+    if (BACK_WORDS.some(w => low === w || low.includes(w.toLowerCase()))) {
+      returnToCameraMode();
+      return null;
+    }
+
+    const WEATHER_WORDS = ['طقس', 'جو', 'حرارة', 'درجة', 'مطر', 'رياح', 'weather', 'temperature', 'rain', 'wind', 'hot', 'cold', 'حار', 'بارد'];
+    const isWeather = WEATHER_WORDS.some(w => low.includes(w));
+
+    let sysCtx = 'أنت مساعد ذكي للأشخاص ذوي الإعاقة البصرية في تونس، مُدمَج في تطبيق AIEyes. ' +
+      'أجب باللغة العربية بإجابات مختصرة وواضحة لا تتجاوز ثلاث جمل. لا تذكر أنك Gemini أو Google.';
+
+    if (isWeather) {
+      try {
+        const loc = await Location.getLastKnownPositionAsync({});
+        if (loc) {
+          const wCtx = await fetchWeatherContext(loc.coords.latitude, loc.coords.longitude);
+          if (wCtx) sysCtx += ` بيانات الطقس الفعلية الآن: ${wCtx}.`;
+        }
+      } catch (_) {}
+    }
+
+    const reply = await groqChat(t, sysCtx);
+    return reply ?? 'تعذّر الحصول على إجابة الآن. حاول مرة أخرى.';
+  }
+
   // ── voice command processor ───────────────────────────────────────────────
   function processVoice(text) {
     const t   = text.trim();
@@ -2086,6 +2412,14 @@ export default function App() {
 
     if (SOS_WORDS.some(w => spoken.includes(w) || low.includes(w))) {
       triggerSOS();
+      shakeVoiceModeRef.current = false;
+      return;
+    }
+
+    const FLIP_WORDS = ['اقلب الكاميرا', 'قلّب الكاميرا', 'قلب الكاميرا', 'كاميرا أمامية', 'كاميرا خلفية', 'flip camera', 'flip', 'switch camera', 'front camera', 'back camera'];
+    if (FLIP_WORDS.some(w => low.includes(w.toLowerCase()) || spoken.includes(w))) {
+      setFacing(f => f === 'back' ? 'front' : 'back');
+      announce('تم تبديل الكاميرا');
       shakeVoiceModeRef.current = false;
       return;
     }
@@ -2116,6 +2450,7 @@ export default function App() {
     }
 
     const modeAliases = {
+      assistant: ['مساعد', 'assistant', 'ai', 'artificial', 'الذكاء', 'ذكاء'],
       explore:  ['استكشاف', 'استكشف', 'explore'],
       read:     ['قراءة', 'اقرأ', 'read'],
       describe: ['وصف', 'describe'],
@@ -2131,11 +2466,12 @@ export default function App() {
           switchMode(i);
           // Delay slightly to let switchMode complete
           setTimeout(() => {
-            if (i === 0) doExplore();
-            else if (i === 1) doRead();
-            else if (i === 2) doDescribe();
-            else if (i === 3) { /* find: wait for target */ }
-            else if (i === 4) doCurrency();
+            const mId = MODES[i].id;
+            if (mId === 'read')          doRead();
+            else if (mId === 'describe') doDescribe();
+            else if (mId === 'explore')  doExplore();
+            else if (mId === 'find')     { /* find: wait for target */ }
+            else if (mId === 'currency') doCurrency();
           }, 250);
         } else {
           switchMode(i);
@@ -2151,11 +2487,32 @@ export default function App() {
       return;
     }
 
+    if (mode.id === 'assistant') {
+      // "camera" / "eyes" / "back to camera" → exit assistant and return to camera view
+      const BACK_TO_CAMERA = ['camera', 'eyes', 'كاميرا', 'الكاميرا', 'back to camera', 'open camera', 'camera mode', 'ارجع', 'رجوع', 'العودة'];
+      if (BACK_TO_CAMERA.some(w => low.includes(w.toLowerCase()) || spoken.includes(w))) {
+        returnToCameraMode();
+        shakeVoiceModeRef.current = false;
+        return;
+      }
+      handleAssistantQuery(spoken).then(reply => {
+        if (reply) setAssistantAnswer({ query: spoken, text: reply });
+      });
+      shakeVoiceModeRef.current = false;
+      return;
+    }
     announce(spoken);
     shakeVoiceModeRef.current = false;
   }
+  processVoiceRef.current = processVoice;
 
   function switchMode(i) {
+    if (MODES[i].id === 'assistant' && mode.id !== 'assistant') {
+      setScanning(false);
+      scanAnim.stopAnimation();
+      scanAnim.setValue(0);
+      setAssistTransition('in');
+    }
     setModeIdx(i);
     setFindTgt(null);
     setStatus('');
@@ -2165,11 +2522,80 @@ export default function App() {
     busy.current = false;
     isSpeaking.current = false;
     setOverlayState((current) => ({ ...current, detections: [] }));
+    setAssistantAnswer(null);
     tts(MODES[i].ar);
+    supabase.from('sessions').insert({ mode: MODES[i].id, user_id: currentUserRef.current?.id ?? null }).then(({ error }) => {
+      console.log('[Supabase] mode switch session:', MODES[i].id, error ?? 'ok');
+    });
   }
+
+  useEffect(() => {
+    if (currentUser) {
+      // Ensure we go through the canonical mode-switch path so the UI and
+      // mode carousel are updated consistently when the user logs in.
+      try {
+        switchMode(exploreModeIdx);
+        // Try centering the mode carousel once it has mounted. The carousel
+        // layout may not be ready immediately after login, so retry a few
+        // times with a short delay until `pillLayouts` and `modeScrollRef`
+        // are available.
+        const centerModeWhenReady = (idx, attempts = 8) => {
+          if (attempts <= 0) return;
+          const layout = pillLayouts.current[idx];
+          if (layout && modeScrollRef.current) {
+            // Use the existing centering helper to animate into place.
+            centerActiveMode(idx, true);
+            return;
+          }
+          setTimeout(() => centerModeWhenReady(idx, attempts - 1), 120);
+        };
+        centerModeWhenReady(exploreModeIdx, 8);
+      } catch (e) {
+        // Fallback: set mode index directly if switchMode isn't available yet
+        setModeIdx((currentModeIdx) => (
+          MODES[currentModeIdx]?.id === 'explore' ? currentModeIdx : exploreModeIdx
+        ));
+      }
+    }
+  }, [currentUser, exploreModeIdx]);
 
   // ── render guards ─────────────────────────────────────────────────────────
   if (splash) return <Splash onDone={() => setSplash(false)} />;
+  if (introDone === null) return <View style={s.center}><ActivityIndicator color={GREEN} size="large" /></View>;
+  if (!introDone) return (
+    <IntroScreen onDone={async () => {
+      await AsyncStorage.setItem('aieyes_intro_done', '1').catch(() => {});
+      setIntroDone(true);
+    }} />
+  );
+  if (!authReady) return <View style={s.center}><ActivityIndicator color={GREEN} size="large" /></View>;
+  if (!currentUser) return <AuthScreen onAuth={(user) => setCurrentUser(user)} />;
+  if (assistTransition === 'in') {
+    return <AssistantTransition direction="in" onDone={() => setAssistTransition(null)} />;
+  }
+  if (mode.id === 'assistant') {
+    return (
+      <View style={{ flex: 1 }}>
+        <AssistantScreen
+          onBack={returnToCameraMode}
+          onMicTap={handleMic}
+          lastAnswer={assistantAnswer}
+          onSendQuery={handleAssistantQuery}
+          isListening={listening}
+        />
+        {assistTransition === 'out' && (
+          <AssistantTransition
+            direction="out"
+            onDone={() => {
+              setAssistTransition(null);
+              switchMode(exploreModeIdx);
+            }}
+          />
+        )}
+      </View>
+    );
+  }
+
   if (!camPerm) return <View style={s.center}><ActivityIndicator color={GREEN} size="large" /></View>;
   if (!camPerm.granted) {
     return (
@@ -2198,7 +2624,7 @@ export default function App() {
         <View pointerEvents="none" style={StyleSheet.absoluteFill}>
           {overlayState.detections.map((det, index) => {
             const rect = computeOverlayRect(det, overlayState, facing === 'front');
-            const color = det.matched ? GREEN : overlayState.tone;
+            const color = det.matched ? GREEN : (det.detColor ?? overlayState.tone);
 
             return (
               <React.Fragment key={`${det.label}-${index}`}>
@@ -2256,18 +2682,25 @@ export default function App() {
 
       {/* ── top bar ── */}
       <View style={s.topBar}>
-        <View style={s.topLogoWrap}>
-          <View style={s.topEye}>
-            <View style={s.topEyePupil} />
-          </View>
-          <View style={s.topBrandCopy}>
-            <Text style={s.topTitle}>عيون الذكاء</Text>
-            <Text style={s.topSubTitle}>السلامة العائلية</Text>
-          </View>
-        </View>
-        <View style={s.liveWrap}>
-          <Animated.View style={[s.liveDot, { transform: [{ scale: pulse }] }]} />
-          <Text style={s.liveTxt}>مباشر</Text>
+        <Text style={s.brandApp}>AIEyes</Text>
+        <TouchableOpacity style={s.flipBtn} onPress={() => setFacing(f => f === 'back' ? 'front' : 'back')} activeOpacity={0.7}>
+          <Text style={s.flipTxt}>⟳</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={s.aiBtn}
+          onPress={() => switchMode(MODES.findIndex((item) => item.id === 'assistant'))}
+          activeOpacity={0.75}
+        >
+          <Text style={s.aiBtnTxt}>AI</Text>
+        </TouchableOpacity>
+        <View style={s.statusPill}>
+          <Animated.View style={[s.statusDot, {
+            transform: [{ scale: pulse }],
+            backgroundColor: overlayState.detections.length > 0 ? '#ff3062' : '#22d9a0',
+          }]}/>
+          <Text style={[s.statusPillTxt, { color: overlayState.detections.length > 0 ? '#ff3062' : '#22d9a0' }]}>
+            {overlayState.detections.length > 0 ? 'ALERT' : 'LIVE'}
+          </Text>
         </View>
       </View>
 
@@ -2316,13 +2749,16 @@ export default function App() {
         </View>
       )}
 
-      {/* ── bottom sheet ── */}
-      <View style={s.sheet}>
-        <View style={s.sheetHandle} />
-        <Text style={s.hint}>{mode.hint}</Text>
-
-        {/* iPhone-style mode dial */}
-        <View style={s.cameraModeWrap}>
+      {/* ── bottom controls ── */}
+      <View style={s.bottomArea}>
+        <LinearGradient
+          colors={['rgba(5,2,16,0)', 'rgba(11,14,28,0.58)', 'rgba(11,20,44,0.82)', 'rgba(5,2,16,0.96)']}
+          locations={[0, 0.22, 0.78, 1]}
+          style={[StyleSheet.absoluteFill, s.dockGradient]}
+          pointerEvents="none"
+        />
+        {/* mode strip */}
+        <View style={[s.cameraModeWrap, { opacity: modeBarReady ? 1 : 0 }]}>
           <ScrollView
             ref={modeScrollRef}
             horizontal
@@ -2332,11 +2768,12 @@ export default function App() {
             onContentSizeChange={(w) => {
               modeContentWidth.current = w;
               if (!initialCentered.current) {
-                // Defer one tick so all child onLayout callbacks have fired first
                 setTimeout(() => {
+                  if (!pillLayouts.current[modeIdx]) return;
                   initialCentered.current = true;
-                  centerActiveMode(2, false);
-                }, 0);
+                  centerActiveMode(modeIdx, false);
+                  setModeBarReady(true);
+                }, 150);
               }
             }}
             onScrollBeginDrag={() => { momentumExpected.current = false; }}
@@ -2351,77 +2788,70 @@ export default function App() {
                   activeOpacity={0.75}
                   onPress={() => switchMode(i)}
                   onLayout={(e) => { pillLayouts.current[i] = e.nativeEvent.layout; }}
-                  style={[s.cameraModeItem, active && s.cameraModeItemActive]}>
+                  style={s.cameraModeItem}>
                   <Text style={[s.cameraModeText, active && s.cameraModeTextActive]}>
                     {m.ar}
                   </Text>
+                  {active && <View style={s.modeUnderline}/>}
                 </TouchableOpacity>
               );
             })}
           </ScrollView>
         </View>
 
-        {/* controls */}
-        <View style={s.ctrl}>
-          {/* flip */}
-          <TouchableOpacity style={s.iconBtn}
-            onPress={() => setFacing(f => f === 'back' ? 'front' : 'back')}>
-            <Text style={s.iconTxt}>⟳</Text>
-          </TouchableOpacity>
-
-          {/* mic */}
-          <TouchableOpacity style={[s.micBtn, listening && s.micRec, isProcessing && !listening && s.micProc]} onPress={handleMic}>
+        {/* center: MIC + caption */}
+        <View style={s.micArea}>
+          <TouchableOpacity
+            style={[s.micBtn, listening && s.micRec, isProcessing && !listening && s.micProc]}
+            onPress={handleMic}>
             {listening
-              ? <View style={s.stopSquare} />
+              ? <View style={s.stopSquare}/>
               : isProcessing
-              ? <ActivityIndicator size="small" color={C.primary} />
+              ? <ActivityIndicator size="small" color={C.primary}/>
               : <Text style={s.micTxt}>◉</Text>}
           </TouchableOpacity>
-
-          {/* SOS — long press 2.5 s */}
-          <View style={s.sosWrap}>
-            <Animated.View
-              pointerEvents="none"
-              style={[
-                s.sosRing,
-                { opacity: sosRingOpacity, transform: [{ scale: sosRingScale }] },
-              ]}
-            />
-            <Pressable
-              style={s.sosBtn}
-              delayLongPress={2000}
-              onPressIn={() => {
-                sosLongPressFired.current = false;
-                clearTimeout(sosPressTimer.current);
-                sosPressAnim.stopAnimation();
-                Animated.timing(sosPressAnim, {
-                  toValue: 1,
-                  duration: 2000,
-                  useNativeDriver: true,
-                }).start();
-              }}
-              onPressOut={() => {
-                clearTimeout(sosPressTimer.current);
-                sosPressAnim.stopAnimation();
-                Animated.timing(sosPressAnim, {
-                  toValue: 0,
-                  duration: 180,
-                  useNativeDriver: true,
-                }).start();
-                if (!sosLongPressFired.current) {
-                  sosLongPressFired.current = false;
-                }
-              }}
-              onLongPress={() => {
-                sosLongPressFired.current = true;
-                triggerSOS();
-              }}
-            >
-              <Text style={s.sosTxt}>SOS</Text>
-            </Pressable>
-          </View>
+          <Text style={s.micCaption}>
+            {listening ? 'LISTENING…' : isProcessing ? 'PROCESSING…' : 'HOLD TO SPEAK'}
+          </Text>
         </View>
       </View>
+
+      {/* SOS — absolute bottom-left */}
+      <View style={s.sosWrap}>
+        <Animated.View
+          pointerEvents="none"
+          style={[s.sosRing, { opacity: sosRingOpacity, transform: [{ scale: sosRingScale }] }]}
+        />
+        <Pressable
+          style={s.sosBtn}
+          delayLongPress={2000}
+          onPressIn={() => {
+            sosLongPressFired.current = false;
+            clearTimeout(sosPressTimer.current);
+            sosPressAnim.stopAnimation();
+            Animated.timing(sosPressAnim, { toValue: 1, duration: 2000, useNativeDriver: true }).start();
+          }}
+          onPressOut={() => {
+            clearTimeout(sosPressTimer.current);
+            sosPressAnim.stopAnimation();
+            Animated.timing(sosPressAnim, { toValue: 0, duration: 180, useNativeDriver: true }).start();
+            if (!sosLongPressFired.current) { sosLongPressFired.current = false; }
+          }}
+          onLongPress={() => { sosLongPressFired.current = true; triggerSOS(); }}>
+          <Text style={s.sosTxt}>SOS</Text>
+        </Pressable>
+      </View>
+
+      {/* Family — absolute bottom-right */}
+      <TouchableOpacity style={s.familyBtn} onPress={() => setShowFamilyModal(true)} activeOpacity={0.7}>
+        <Text style={s.familyBtnTxt}>👥</Text>
+      </TouchableOpacity>
+
+      <FamilyModal
+        visible={showFamilyModal}
+        onClose={() => setShowFamilyModal(false)}
+        currentUser={currentUser}
+      />
     </View>
   );
 }
@@ -2462,39 +2892,50 @@ const s = StyleSheet.create({
   // top bar
   topBar: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    marginTop: Platform.OS === 'android' ? 10 : 14,
-    marginHorizontal: 10,
-    paddingTop: Platform.OS === 'android' ? 14 : 18,
-    paddingBottom: 12, paddingHorizontal: 14,
-    backgroundColor: 'rgba(18, 16, 41, 0.82)',
-    borderWidth: 1, borderColor: 'rgba(120, 109, 255, 0.18)',
-    borderRadius: 22,
-    shadowColor: C.primary, shadowOpacity: 0.10, shadowRadius: 14, elevation: 4,
+    position: 'absolute', top: 0, left: 0, right: 0, zIndex: 10,
+    paddingTop: Platform.OS === 'android' ? 30 : 54,
+    paddingBottom: 12, paddingHorizontal: 20,
   },
-  topLogoWrap: { flex: 1, flexDirection: 'row', alignItems: 'center' },
-  topEye: {
-    width: 26, height: 26, borderRadius: 13,
-    borderWidth: 1.5, borderColor: C.primary,
+  brandApp: {
+    color: '#F4F3FF', fontSize: 22, fontWeight: '700', letterSpacing: 0.5,
+  },
+  flipBtn: {
+    width: 34, height: 34, borderRadius: 17,
     alignItems: 'center', justifyContent: 'center',
-    shadowColor: C.primary, shadowOpacity: 0.55, shadowRadius: 6, elevation: 4,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)',
   },
-  topEyePupil: { width: 8, height: 8, borderRadius: 4, backgroundColor: C.primary },
-  topBrandCopy: { marginLeft: 10, flexShrink: 1 },
-  topTitle: { color: C.textPri, fontSize: 15, fontWeight: '700', letterSpacing: 1.2 },
-  topSubTitle: { color: C.textMuted, fontSize: 10, fontWeight: '600', letterSpacing: 2.1, marginTop: 2 },
-  liveWrap: {
-    minWidth: 82,
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end',
-    paddingHorizontal: 12, paddingVertical: 7,
-    borderRadius: 999,
-    backgroundColor: 'rgba(120, 109, 255, 0.10)',
-    borderWidth: 1, borderColor: 'rgba(120, 109, 255, 0.16)',
+  flipTxt: { color: 'rgba(255,255,255,0.7)', fontSize: 16 },
+  aiBtn: {
+    height: 34, minWidth: 44, borderRadius: 17,
+    paddingHorizontal: 12,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(120,109,255,0.18)',
+    borderWidth: 1, borderColor: 'rgba(120,109,255,0.32)',
   },
-  liveDot:  {
-    width: 7, height: 7, borderRadius: 3.5, backgroundColor: C.primary, marginRight: 5,
-    shadowColor: C.primary, shadowOpacity: 0.8, shadowRadius: 5, elevation: 3,
+  aiBtnTxt: {
+    color: '#F4F7FF', fontSize: 12, fontWeight: '800', letterSpacing: 1.2,
   },
-  liveTxt:  { color: C.primary, fontSize: 11, fontWeight: '600', letterSpacing: 1.5 },
+  statusPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.07)',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)',
+  },
+  statusDot: {
+    width: 7, height: 7, borderRadius: 3.5,
+    shadowOpacity: 0.8, shadowRadius: 5, elevation: 3,
+  },
+  statusPillTxt: { fontSize: 11, fontWeight: '700', letterSpacing: 1.4 },
+  familyBtn: {
+    position: 'absolute',
+    bottom: Platform.OS === 'android' ? 66 : 80,
+    right: 22, width: 50, height: 50, borderRadius: 25,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(120,109,255,0.16)',
+    borderWidth: 1.5, borderColor: 'rgba(120,109,255,0.35)',
+  },
+  familyBtnTxt: { fontSize: 20 },
 
   // overlays
   findBadge: {
@@ -2529,7 +2970,7 @@ const s = StyleSheet.create({
 
   // banner
   banner: {
-    position: 'absolute', bottom: 174, left: 12, right: 12,
+    position: 'absolute', bottom: 215, left: 12, right: 12,
     backgroundColor: 'rgba(16, 15, 38, 0.90)',
     borderRadius: 16, paddingVertical: 14, paddingHorizontal: 18,
     borderWidth: 1, borderColor: C.border,
@@ -2538,35 +2979,26 @@ const s = StyleSheet.create({
   bannerTxt: { color: C.textPri, fontSize: 17, textAlign: 'center', lineHeight: 28 },
 
   statusBox: {
-    position: 'absolute', bottom: 244, left: 12, right: 12,
+    position: 'absolute', bottom: 285, left: 12, right: 12,
     backgroundColor: C.warnDim,
     borderColor: `${C.warn}88`, borderWidth: 1,
     borderRadius: 12, paddingVertical: 8, paddingHorizontal: 12,
   },
   statusTxt: { color: C.warn, fontSize: 14, textAlign: 'center' },
 
-  // sheet
-  sheet: {
+  // bottom area
+  bottomArea: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
-    backgroundColor: C.glass,
-    paddingTop: 8,
-    paddingBottom: Platform.OS === 'android' ? 16 : 30,
-    borderTopWidth: 1, borderTopColor: C.border,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
+    paddingBottom: Platform.OS === 'android' ? 16 : 28,
+    paddingTop: 12,
+    alignItems: 'center',
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
     overflow: 'hidden',
   },
-  sheetHandle: {
-    alignSelf: 'center',
-    width: 46,
-    height: 4,
-    borderRadius: 999,
-    backgroundColor: 'rgba(201, 194, 255, 0.20)',
-    marginBottom: 8,
-  },
-  hint: {
-    color: C.textMuted, fontSize: 11,
-    textAlign: 'center', marginBottom: 8, letterSpacing: 0.7,
+  dockGradient: {
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
   },
 
   // pills
@@ -2587,6 +3019,7 @@ const s = StyleSheet.create({
   // camera-style mode dial
   cameraModeWrap: {
     height: 48,
+    alignSelf: 'stretch',
     justifyContent: 'center',
     marginBottom: 6,
     overflow: 'visible',
@@ -2600,57 +3033,58 @@ const s = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 10,
     paddingVertical: 4,
-    borderRadius: 999,
-    opacity: 0.4,
-  },
-  cameraModeItemActive: {
-    opacity: 1,
   },
   cameraModeText: {
-    fontSize: 13,
-    color: C.textMuted,
+    fontSize: 14,
+    color: 'rgba(255,255,255,0.42)',
     fontWeight: '500',
   },
   cameraModeTextActive: {
-    fontSize: 17,
-    color: C.textPri,
+    fontSize: 15,
+    color: '#F4F3FF',
     fontWeight: '700',
     letterSpacing: 0.2,
   },
-
-  // controls
-  ctrl: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 40, paddingTop: 12,
+  modeUnderline: {
+    width: 24, height: 2, borderRadius: 1,
+    backgroundColor: '#b29bff',
+    marginTop: 3,
   },
-  iconBtn: {
-    width: 48, height: 48, borderRadius: 24,
-    backgroundColor: 'rgba(120, 109, 255, 0.10)',
-    alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1, borderColor: 'rgba(120, 109, 255, 0.18)',
-  },
-  iconTxt: { color: C.textSec, fontSize: 20 },
 
+  // mic + SOS + family
+  micArea: {
+    alignItems: 'center', marginTop: 10, marginBottom: 4,
+  },
   micBtn: {
-    width: 66, height: 66, borderRadius: 33,
-    backgroundColor: C.primary,
+    width: 76, height: 76, borderRadius: 38,
+    backgroundColor: '#ffffff',
     alignItems: 'center', justifyContent: 'center',
-    elevation: 10,
-    shadowColor: C.primary, shadowOpacity: 0.6,
-    shadowOffset: { width: 0, height: 2 }, shadowRadius: 14,
+    elevation: 12,
+    shadowColor: '#ffffff', shadowOpacity: 0.35,
+    shadowOffset: { width: 0, height: 4 }, shadowRadius: 18,
   },
   micRec:  { backgroundColor: C.danger, shadowColor: C.danger },
   micProc: { backgroundColor: C.surface, shadowColor: C.primary, shadowOpacity: 0.25 },
-  micTxt:  { color: C.bg, fontSize: 26 },
-  stopSquare: { width: 18, height: 18, borderRadius: 3, backgroundColor: '#fff' },
+  micTxt:  { color: C.bg, fontSize: 28 },
+  micCaption: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 10, fontWeight: '700', letterSpacing: 2,
+    marginTop: 8,
+  },
+  stopSquare: { width: 18, height: 18, borderRadius: 3, backgroundColor: C.bg },
 
   sosBtn: {
-    width: 48, height: 48, borderRadius: 24,
-    backgroundColor: 'rgba(255, 48, 98, 0.12)',
+    width: 50, height: 50, borderRadius: 25,
+    backgroundColor: 'rgba(255, 48, 98, 0.10)',
     alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1.5, borderColor: `${C.danger}55`,
+    borderWidth: 1.5, borderColor: 'rgba(255,48,98,0.6)',
   },
-  sosWrap: { width: 64, height: 64, alignItems: 'center', justifyContent: 'center' },
+  sosWrap: {
+    position: 'absolute',
+    bottom: Platform.OS === 'android' ? 66 : 80,
+    left: 22, width: 64, height: 64,
+    alignItems: 'center', justifyContent: 'center',
+  },
   sosRing: {
     position: 'absolute',
     width: 64, height: 64, borderRadius: 32,

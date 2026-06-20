@@ -137,6 +137,41 @@ export async function geminiSearchForObject(base64, targetHint) {
 }
 
 /**
+ * Gemini text-only chat (no image) — for AI assistant queries
+ * @param {string} question - User's question
+ * @param {string} systemContext - System context prepended to the message
+ */
+export async function geminiChat(question, systemContext = '') {
+  if (!GEMINI_KEY) return null;
+  if (Date.now() < geminiBlockedUntil) return null;
+
+  const userText = systemContext ? `${systemContext}\n\nالسؤال: ${question}` : question;
+
+  try {
+    const response = await fetch(`${GEMINI_API_BASE}?key=${GEMINI_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: userText }] }],
+        generationConfig: { maxOutputTokens: 350, temperature: 0.7 },
+      }),
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      if (response.status === 429) {
+        geminiBlockedUntil = Date.now() + (/quota|billing|exceeded/i.test(err?.error?.message || '') ? 15 * 60 * 1000 : 65 * 1000);
+      }
+      return null;
+    }
+    const data = await response.json();
+    return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? null;
+  } catch (e) {
+    console.log('[GeminiChat] error:', e?.message);
+    return null;
+  }
+}
+
+/**
  * Reset rate limit (for testing)
  */
 export function resetGeminiRateLimit() {

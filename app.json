@@ -23,6 +23,7 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
+      "softwareKeyboardLayoutMode": "pan",
       "usesCleartextTraffic": true,
       "edgeToEdgeEnabled": true,
       "permissions": [

@@ -17,7 +17,21 @@
       "Bash(curl -sI \"https://github.com/ultralytics/ultralytics/raw/main/tests/assets/bus.jpg\")",
       "Bash(python *)",
       "Bash(pip install *)",
-      "Bash(npx expo *)"
+      "Bash(npx expo *)",
+      "Bash(npx expo-env-info *)",
+      "Bash(Get-Content \"C:\\\\Users\\\\LENOVO\\\\AIEyes\\\\App.js\")",
+      "Bash(Measure-Object -Line)",
+      "Bash(Select-Object -ExpandProperty Lines)",
+      "PowerShell(\\(Get-Content \"C:\\\\Users\\\\LENOVO\\\\AIEyes\\\\App.js\" | Measure-Object -Line\\).Lines)",
+      "Bash(npx --no-install babel --presets @babel/preset-react --only-check App.js)",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\LENOVO\\\\AIEyes\" -Force | Select-Object Name, @{Name=\"Type\"; Expression={if\\($_.PSIsContainer\\){\"Directory\"}else{\"File\"}}} | Format-Table -AutoSize)",
+      "WebFetch(domain:api.anthropic.com)",
+      "Bash(copy \"webfetch-1778780855270-i76ypj.bin\" \"design.gz\")",
+      "Bash(powershell -Command \"Expand-Archive -LiteralPath 'design.gz' -DestinationPath 'design_out' -Force\")",
+      "Bash(python3 *)",
+      "Bash(dir \"C:\\\\Users\\\\LENOVO\\\\AIEyes\\\\AIEyes Premium Mobile UI\\\\\" 2>&1 | head -40 *)",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\LENOVO\\\\AIEyes\" -Depth 0 | Select-Object Name, @{N='Type';E={if\\($_.PSIsContainer\\){'DIR'}else{'FILE'}}})",
+      "PowerShell(Get-Content *)"
     ]
   }
 }
