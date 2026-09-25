@@ -1,3 +1,8 @@
+# Local editor / assistant settings and Python bytecode
+.claude/settings.local.json
+__pycache__/
+*.pyc
+
 # Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
 
 # dependencies
