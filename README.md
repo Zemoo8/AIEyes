@@ -2,6 +2,8 @@
 
 Mobile accessibility app for blind and low-vision Arabic speakers in Tunisia. The phone camera becomes a real-time visual assistant that narrates the world back to the user in spoken Arabic.
 
+Case study: [ahmedbaghouli.world](https://www.ahmedbaghouli.world/en/work/ai-eyes/)
+
 ## Features
 
 - **Object detection**: YOLOv8 finds everyday objects and estimates how far away they are
@@ -9,6 +11,7 @@ Mobile accessibility app for blind and low-vision Arabic speakers in Tunisia. Th
 - **Scene description**: a vision LLM describes what is in front of the camera
 - **Navigation**: GPS guidance outdoors, QR codes for indoor spots (e.g. university doors)
 - **Arabic voice output**: all feedback is spoken with text-to-speech
+- **Voice input**: speech recognition (Whisper) lets the user give spoken commands
 - **Family link**: relatives can follow activity and alerts from the [web dashboard](https://github.com/Zemoo8/AI-Eyes-dashboard)
 
 ## Architecture
